@@ -32,7 +32,8 @@ class ScreenWatcherApp:
             self.config.api_key,
             self.config.prompt,
             self.config.safety_settings,
-            self._on_gemini_response
+            self._on_gemini_response,
+            self.config.max_output_tokens
         )
         
         self.streaming_manager = StreamingManager(

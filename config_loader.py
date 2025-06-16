@@ -12,6 +12,7 @@ class ConfigLoader:
         self.image_quality = 85
         self.prompt = "Watch this screen region and describe what you see. Alert me of any significant changes or interesting activity."
         self.safety_settings = None  # Default to Gemini's built-in safety
+        self.max_output_tokens = 500  # Limit response length
         
         self._load_config()
     
@@ -25,6 +26,7 @@ class ConfigLoader:
             self.image_quality = getattr(config, 'IMAGE_QUALITY', 85)
             self.prompt = getattr(config, 'PROMPT', self.prompt)
             self.safety_settings = getattr(config, 'SAFETY_SETTINGS', None)
+            self.max_output_tokens = getattr(config, 'MAX_OUTPUT_TOKENS', 500)
         except ImportError:
             print("Warning: config.py not found. Using default settings.")
     

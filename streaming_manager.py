@@ -65,20 +65,25 @@ class StreamingManager:
     
     def restart_streaming_session(self):
         """Restart the streaming session"""
+        print("=== RESTART: Initiating session restart ===")
+        
         if self.restart_callback:
             self.restart_callback()
         
         # Stop current streaming
+        was_streaming = self.is_streaming
         self.is_streaming = False
         
         # Cancel tasks
         for task in self.current_tasks:
             if not task.done():
+                print(f"Cancelling task: {task}")
                 task.cancel()
         self.current_tasks.clear()
         
         # Disconnect Gemini client
         if self.gemini_client.websocket:
+            print("Disconnecting Gemini client...")
             try:
                 async def close_ws():
                     await self.gemini_client.disconnect()
@@ -94,14 +99,23 @@ class StreamingManager:
             except Exception as e:
                 print(f"Error in websocket cleanup: {e}")
         
-        # Restart after short delay
-        def restart_after_cleanup():
-            if not self.is_streaming:
-                self.start_streaming()
-        
-        # Use threading timer for restart
-        restart_timer = threading.Timer(0.5, restart_after_cleanup)
-        restart_timer.start()
+        # Only restart if we were actually streaming
+        if was_streaming:
+            print("Scheduling restart after cleanup...")
+            # Restart after short delay
+            def restart_after_cleanup():
+                print("Executing delayed restart...")
+                if not self.is_streaming:  # Double-check we're still stopped
+                    print("Starting new streaming session...")
+                    self.start_streaming()
+                else:
+                    print("Already streaming, skipping restart")
+            
+            # Use threading timer for restart
+            restart_timer = threading.Timer(0.5, restart_after_cleanup)
+            restart_timer.start()
+        else:
+            print("Was not streaming, skipping restart")
     
     def get_time_until_restart(self):
         """Get time remaining until next restart"""
@@ -138,9 +152,11 @@ class StreamingManager:
                 # Check if we need to restart the streaming session
                 if (self.is_streaming and self.session_start_time and 
                     (time.time() - self.session_start_time) >= self.restart_interval):
+                    print("=== RESTART: Time limit reached, scheduling restart ===")
                     # Schedule restart on main thread
                     restart_timer = threading.Timer(0, self.restart_streaming_session)
                     restart_timer.start()
+                    return  # Exit the session
                     
             else:
                 self._update_status("Connection failed", "red")
@@ -170,19 +186,36 @@ class StreamingManager:
         frame_interval = 1.0 / self.fps
         
         try:
+            print(f"Starting streaming loop with {self.fps} FPS (interval: {frame_interval}s)")
+            frame_count = 0
+            
             while self.is_streaming:
                 try:
+                    frame_count += 1
+                    print(f"Capturing frame {frame_count}...")
+                    
                     # Check if we need to restart the streaming session
                     if (self.is_streaming and self.session_start_time and 
                         (time.time() - self.session_start_time) >= self.restart_interval):
+                        print("=== RESTART: Streaming loop detected time limit reached ===")
                         break  # Exit loop to trigger session restart
                     
                     # Capture frame
                     frame = self.screen_capture.capture_frame()
                     if frame and self.is_streaming:
+                        print("Frame captured successfully, converting to base64...")
                         base64_image = self.screen_capture.image_to_base64(frame)
-                        await self.gemini_client.send_image(base64_image)
+                        print(f"Base64 conversion complete, sending to Gemini...")
+                        success = await self.gemini_client.send_image(base64_image)
+                        if success:
+                            print("Image sent successfully")
+                        else:
+                            print("Failed to send image")
+                            break
+                    else:
+                        print("No frame captured or streaming stopped")
                         
+                    print(f"Sleeping for {frame_interval}s...")
                     await asyncio.sleep(frame_interval)
                     
                 except asyncio.CancelledError:
@@ -191,8 +224,12 @@ class StreamingManager:
                 except Exception as e:
                     if self.is_streaming:
                         print(f"Error in streaming loop: {e}")
+                        import traceback
+                        traceback.print_exc()
                     break
         except Exception as e:
             print(f"Streaming loop error: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
             print("Streaming loop stopped")
