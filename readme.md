@@ -160,3 +160,7 @@ You can modify the code to:
 ## License
 
 This project is provided as-is for educational and personal use. Please respect Google's API terms of service and usage limits.
+
+# build
+
+``` pyinstaller "Gemini Screen Watcher.spec"```

@@ -3,11 +3,11 @@
 Gemini Screen Watcher - Main Entry Point
 """
 
-from screen_watcher_app import ScreenWatcherApp
+from app_controller import AppController
 
 def main():
     """Main entry point for the application"""
-    app = ScreenWatcherApp()
+    app = AppController()
     app.run()
 
 if __name__ == "__main__":
