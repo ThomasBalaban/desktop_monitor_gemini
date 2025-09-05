@@ -13,6 +13,7 @@ class ConfigLoader:
         self.prompt = "Watch this screen region and describe what you see. Alert me of any significant changes or interesting activity."
         self.safety_settings = None  # Default to Gemini's built-in safety
         self.max_output_tokens = 500  # Limit response length
+        self.debug_mode = False  # Debug mode for verbose logging
         
         self._load_config()
     
@@ -27,6 +28,7 @@ class ConfigLoader:
             self.prompt = getattr(config, 'PROMPT', self.prompt)
             self.safety_settings = getattr(config, 'SAFETY_SETTINGS', None)
             self.max_output_tokens = getattr(config, 'MAX_OUTPUT_TOKENS', 500)
+            self.debug_mode = getattr(config, 'DEBUG_MODE', False)
         except ImportError:
             print("Warning: config.py not found. Using default settings.")
     
@@ -47,4 +49,14 @@ class ConfigLoader:
     def get_settings_description(self):
         """Get human-readable description of settings"""
         safety_desc = "Default" if self.safety_settings is None else "Custom"
-        return f"FPS: {self.fps}, Quality: {self.image_quality}, Safety: {safety_desc}, Auto-restart: 30s"
+        debug_desc = "Enabled" if self.debug_mode else "Disabled"
+        return f"FPS: {self.fps}, Quality: {self.image_quality}, Safety: {safety_desc}, Debug: {debug_desc}, Auto-restart: 20s"
+    
+    def debug_print(self, message):
+        """Print message only if debug mode is enabled"""
+        if self.debug_mode:
+            print(f"[DEBUG] {message}")
+    
+    def info_print(self, message):
+        """Print important messages regardless of debug mode"""
+        print(message)

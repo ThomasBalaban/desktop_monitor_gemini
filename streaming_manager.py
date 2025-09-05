@@ -17,11 +17,12 @@ class StreamingState(Enum):
 class StreamingManager:
     """Manages the screen streaming process with improved restart reliability"""
     
-    def __init__(self, screen_capture, gemini_client, fps=1, restart_interval=15):
+    def __init__(self, screen_capture, gemini_client, fps=1, restart_interval=20, debug_mode=False):
         self.screen_capture = screen_capture
         self.gemini_client = gemini_client
         self.fps = fps
         self.restart_interval = restart_interval
+        self.debug_mode = debug_mode
         
         self.state = StreamingState.STOPPED
         self.session_start_time = None
@@ -33,6 +34,15 @@ class StreamingManager:
         # Callbacks
         self.status_callback = None
         self.restart_callback = None
+    
+    def debug_print(self, message):
+        """Print message only if debug mode is enabled"""
+        if self.debug_mode:
+            print(f"[DEBUG] {message}")
+    
+    def info_print(self, message):
+        """Print important messages regardless of debug mode"""
+        print(message)
     
     def set_status_callback(self, callback):
         """Set callback for status updates"""
@@ -50,7 +60,7 @@ class StreamingManager:
     def start_streaming(self):
         """Start the streaming process"""
         if self.state != StreamingState.STOPPED:
-            print(f"Cannot start streaming - current state: {self.state}")
+            self.debug_print(f"Cannot start streaming - current state: {self.state}")
             return False
             
         self.state = StreamingState.CONNECTING
@@ -64,7 +74,7 @@ class StreamingManager:
             try:
                 self.current_loop.run_until_complete(self._run_streaming_session())
             except Exception as e:
-                print(f"Streaming thread error: {e}")
+                self.info_print(f"Streaming thread error: {e}")
                 self.state = StreamingState.ERROR
                 self._update_status("Error occurred", "red")
             finally:
@@ -73,7 +83,7 @@ class StreamingManager:
                     if not self.current_loop.is_closed():
                         self.current_loop.close()
                 except Exception as e:
-                    print(f"Error closing event loop: {e}")
+                    self.debug_print(f"Error closing event loop: {e}")
                 self.current_loop = None
                 if self.state not in [StreamingState.RESTARTING, StreamingState.STOPPED]:
                     self.state = StreamingState.STOPPED
@@ -84,7 +94,7 @@ class StreamingManager:
     
     def stop_streaming(self):
         """Stop the streaming process"""
-        print("=== STOP: Stopping streaming ===")
+        self.info_print("Stopping streaming...")
         
         # Set state to stopped to prevent restarts
         old_state = self.state
@@ -101,14 +111,14 @@ class StreamingManager:
         """Restart the streaming session with improved reliability"""
         with self.restart_lock:  # Prevent multiple simultaneous restarts
             if self.state == StreamingState.RESTARTING:
-                print("Restart already in progress, skipping...")
+                self.debug_print("Restart already in progress, skipping...")
                 return
             
             if self.state == StreamingState.STOPPED:
-                print("Cannot restart - streaming is stopped")
+                self.debug_print("Cannot restart - streaming is stopped")
                 return
             
-            print("=== RESTART: Initiating session restart ===")
+            self.info_print("Restarting streaming session...")
             
             # Set restarting state
             old_state = self.state
@@ -126,7 +136,7 @@ class StreamingManager:
             
             # Check if we're still supposed to be restarting
             if self.state != StreamingState.RESTARTING:
-                print("Restart cancelled - state changed during cleanup")
+                self.debug_print("Restart cancelled - state changed during cleanup")
                 return
             
             # Reset state and start new session
@@ -134,7 +144,7 @@ class StreamingManager:
             success = self.start_streaming()
             
             if not success:
-                print("Failed to restart streaming session")
+                self.info_print("Failed to restart streaming session")
                 self.state = StreamingState.ERROR
                 self._update_status("Restart failed", "red")
     
@@ -151,7 +161,7 @@ class StreamingManager:
                     try:
                         future.result(timeout=2.0)
                     except Exception as e:
-                        print(f"Error cancelling streaming task: {e}")
+                        self.debug_print(f"Error cancelling streaming task: {e}")
                 
                 if self.listener_task and not self.listener_task.done():
                     future = asyncio.run_coroutine_threadsafe(
@@ -161,7 +171,7 @@ class StreamingManager:
                     try:
                         future.result(timeout=2.0)
                     except Exception as e:
-                        print(f"Error cancelling listener task: {e}")
+                        self.debug_print(f"Error cancelling listener task: {e}")
                 
                 # Disconnect from Gemini
                 future = asyncio.run_coroutine_threadsafe(
@@ -170,12 +180,12 @@ class StreamingManager:
                 )
                 try:
                     future.result(timeout=3.0)
-                    print("Disconnected from Gemini successfully")
+                    self.debug_print("Disconnected from Gemini successfully")
                 except Exception as e:
-                    print(f"Disconnect timeout or error: {e}")
+                    self.debug_print(f"Disconnect timeout or error: {e}")
                     
             except Exception as e:
-                print(f"Error during cleanup: {e}")
+                self.debug_print(f"Error during cleanup: {e}")
     
     async def _cancel_task(self, task):
         """Safely cancel an async task"""
@@ -186,7 +196,7 @@ class StreamingManager:
             except asyncio.CancelledError:
                 pass
             except Exception as e:
-                print(f"Error while cancelling task: {e}")
+                self.debug_print(f"Error while cancelling task: {e}")
     
     def get_time_until_restart(self):
         """Get time remaining until next restart"""
@@ -211,7 +221,7 @@ class StreamingManager:
             # Connect to Gemini
             if await self.gemini_client.connect():
                 if self.state == StreamingState.RESTARTING:
-                    print("Session cancelled during connection")
+                    self.debug_print("Session cancelled during connection")
                     return
                 
                 self.state = StreamingState.STREAMING
@@ -233,7 +243,7 @@ class StreamingManager:
                         
                         # Check if it's time to restart
                         if self.should_restart():
-                            print("=== RESTART: Time limit reached ===")
+                            self.debug_print("Time limit reached for session restart")
                             # Schedule restart in separate thread to avoid blocking
                             threading.Thread(
                                 target=self.restart_streaming_session, 
@@ -245,19 +255,20 @@ class StreamingManager:
                         await asyncio.sleep(0.5)
                     
                     # If we get here, a task completed or state changed
-                    print(f"Streaming session ended - State: {self.state}")
+                    self.debug_print(f"Streaming session ended - State: {self.state}")
                     
                 except Exception as e:
-                    print(f"Error in streaming session: {e}")
+                    self.info_print(f"Error in streaming session: {e}")
                     
             else:
                 self.state = StreamingState.ERROR
                 self._update_status("Connection failed", "red")
                 
         except Exception as e:
-            print(f"Streaming session error: {e}")
-            import traceback
-            traceback.print_exc()
+            self.info_print(f"Streaming session error: {e}")
+            if self.debug_mode:
+                import traceback
+                traceback.print_exc()
             self.state = StreamingState.ERROR
             self._update_status("Error occurred", "red")
         finally:
@@ -269,7 +280,7 @@ class StreamingManager:
             try:
                 await self.gemini_client.disconnect()
             except Exception as e:
-                print(f"Error during final disconnect: {e}")
+                self.debug_print(f"Error during final disconnect: {e}")
             
             self.streaming_task = None
             self.listener_task = None
@@ -284,7 +295,7 @@ class StreamingManager:
         frame_interval = 1.0 / self.fps
         
         try:
-            print(f"Starting streaming loop with {self.fps} FPS (interval: {frame_interval}s)")
+            self.debug_print(f"Starting streaming loop with {self.fps} FPS (interval: {frame_interval}s)")
             frame_count = 0
             consecutive_failures = 0
             max_failures = 5
@@ -292,34 +303,34 @@ class StreamingManager:
             while self.state == StreamingState.STREAMING:
                 try:
                     frame_count += 1
-                    print(f"Capturing frame {frame_count}...")
+                    self.debug_print(f"Capturing frame {frame_count}...")
                     
                     # Check if we should continue
                     if self.state != StreamingState.STREAMING:
-                        print("Streaming state changed, exiting loop")
+                        self.debug_print("Streaming state changed, exiting loop")
                         break
                     
                     # Capture frame
                     frame = self.screen_capture.capture_frame()
                     if frame and self.state == StreamingState.STREAMING:
-                        print("Frame captured successfully, converting to base64...")
+                        self.debug_print("Frame captured successfully, converting to base64...")
                         base64_image = self.screen_capture.image_to_base64(frame)
-                        print(f"Base64 conversion complete, sending to Gemini...")
+                        self.debug_print(f"Base64 conversion complete, sending to Gemini...")
                         
                         success = await self.gemini_client.send_image(base64_image)
                         if success:
-                            print("Image sent successfully")
+                            self.debug_print("Image sent successfully")
                             consecutive_failures = 0  # Reset failure counter
                         else:
                             consecutive_failures += 1
-                            print(f"Failed to send image (failure {consecutive_failures}/{max_failures})")
+                            self.debug_print(f"Failed to send image (failure {consecutive_failures}/{max_failures})")
                             
                             if consecutive_failures >= max_failures:
-                                print("Too many consecutive failures, stopping streaming")
+                                self.info_print("Too many consecutive failures, stopping streaming")
                                 self.state = StreamingState.ERROR
                                 break
                     else:
-                        print("No frame captured or streaming stopped")
+                        self.debug_print("No frame captured or streaming stopped")
                         if self.state != StreamingState.STREAMING:
                             break
                         
@@ -327,18 +338,18 @@ class StreamingManager:
                     try:
                         await asyncio.sleep(frame_interval)
                     except asyncio.CancelledError:
-                        print("Streaming loop sleep cancelled")
+                        self.debug_print("Streaming loop sleep cancelled")
                         break
                     
                 except asyncio.CancelledError:
-                    print("Streaming loop cancelled")
+                    self.debug_print("Streaming loop cancelled")
                     break
                 except Exception as e:
                     consecutive_failures += 1
                     if self.state == StreamingState.STREAMING:
-                        print(f"Error in streaming loop: {e} (failure {consecutive_failures}/{max_failures})")
+                        self.info_print(f"Error in streaming loop: {e} (failure {consecutive_failures}/{max_failures})")
                         if consecutive_failures >= max_failures:
-                            print("Too many consecutive errors, stopping streaming")
+                            self.info_print("Too many consecutive errors, stopping streaming")
                             self.state = StreamingState.ERROR
                             break
                         # Wait a bit before retrying
@@ -347,10 +358,11 @@ class StreamingManager:
                         break
                     
         except Exception as e:
-            print(f"Streaming loop error: {e}")
-            import traceback
-            traceback.print_exc()
+            self.info_print(f"Streaming loop error: {e}")
+            if self.debug_mode:
+                import traceback
+                traceback.print_exc()
             if self.state == StreamingState.STREAMING:
                 self.state = StreamingState.ERROR
         finally:
-            print("Streaming loop stopped")
+            self.debug_print("Streaming loop stopped")

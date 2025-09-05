@@ -23,6 +23,13 @@ class ScreenWatcherApp:
         # Load configuration
         self.config = ConfigLoader()
         
+        # Print startup message
+        print("Gemini Screen Watcher - Starting up...")
+        if self.config.debug_mode:
+            print("[DEBUG] Debug mode enabled - verbose logging active")
+        else:
+            print("Debug mode disabled - showing only important messages")
+        
         # Initialize components
         self.screen_capture = ScreenCapture(self.config.image_quality)
         if self.config.capture_region:
@@ -33,14 +40,16 @@ class ScreenWatcherApp:
             self.config.prompt,
             self.config.safety_settings,
             self._on_gemini_response,
-            self.config.max_output_tokens
+            self.config.max_output_tokens,
+            self.config.debug_mode
         )
         
         self.streaming_manager = StreamingManager(
             self.screen_capture,
             self.gemini_client,
             self.config.fps,
-            restart_interval=30
+            restart_interval=30,
+            debug_mode=self.config.debug_mode
         )
         
         # Set up callbacks
@@ -58,6 +67,8 @@ class ScreenWatcherApp:
         
         # Start countdown timer
         self._update_restart_countdown()
+        
+        print("Application initialization complete")
     
     def _setup_ui(self):
         """Setup the user interface"""
@@ -206,18 +217,22 @@ class ScreenWatcherApp:
 1. Set your API_KEY: 
    API_KEY = "your_actual_api_key_here"
 
-2. Configure screen region (optional):
+2. Enable/disable debug mode:
+   DEBUG_MODE = True   # Shows detailed console messages
+   DEBUG_MODE = False  # Shows only important messages (default)
+
+3. Configure screen region (optional):
    CAPTURE_REGION = {
        "left": 100, "top": 100, 
        "width": 800, "height": 600
    }
    Or set to None to select visually each time.
 
-3. Adjust settings:
+4. Adjust settings:
    FPS = 2              # Frames per second
    IMAGE_QUALITY = 85   # JPEG quality (50-100)
 
-4. Configure safety settings (optional):
+5. Configure safety settings (optional):
    # Use default Gemini safety (recommended):
    SAFETY_SETTINGS = None
    
@@ -231,9 +246,13 @@ class ScreenWatcherApp:
    
    # Other thresholds: BLOCK_LOW_AND_ABOVE, BLOCK_MEDIUM_AND_ABOVE, BLOCK_ONLY_HIGH
 
-5. The prompt is already set and doesn't need changing.
+6. The prompt is already set and doesn't need changing.
 
-6. Restart the application after making changes.
+7. Restart the application after making changes.
+
+Debug Mode:
+- When enabled: Shows frame capture details, base64 conversion messages, WebSocket communications
+- When disabled: Shows only connection status, errors, and restart notifications
 
 Note: Using BLOCK_NONE may require Google's review for your API key.
 """
@@ -272,6 +291,7 @@ Note: Using BLOCK_NONE may require Google's review for your API key.
             messagebox.showerror("Error", "Please select a screen region first")
             return
         
+        print("Starting streaming session...")
         if self.streaming_manager.start_streaming():
             self.start_button.config(state=tk.DISABLED)
             self.stop_button.config(state=tk.NORMAL)

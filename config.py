@@ -5,6 +5,9 @@ MONITOR_AREA = {"left": 14, "top": 154, "width": 1222, "height": 685}
 
 API_KEY = GEMINI_API_KEY
 
+# Debug Mode - set to True to see detailed console messages
+DEBUG_MODE = False
+
 # Screen Region Configuration
 # Set to None to use GUI selection, or specify coordinates:
 CAPTURE_REGION = {
