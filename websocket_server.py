@@ -33,25 +33,98 @@ class WebSocketServer:
         async with websockets.serve(self._connection_handler, "localhost", WEBSOCKET_PORT):
             await asyncio.Future()  # Run forever
 
-    async def _connection_handler(self, websocket, path):
+    async def _connection_handler(self, websocket, path=None):
         """Handles new client connections."""
         self.connected_clients.add(websocket)
         print(f"New AI client connected. Total clients: {len(self.connected_clients)}")
+        
         try:
-            await websocket.wait_closed()
+            # Send a welcome message to the newly connected client
+            welcome_message = {
+                "type": "connection_established",
+                "timestamp": asyncio.get_event_loop().time(),
+                "message": "Connected to Gemini Screen Watcher WebSocket"
+            }
+            await websocket.send(json.dumps(welcome_message))
+            
+            # Keep the connection alive by listening for messages
+            # This prevents the connection from closing immediately
+            async for message in websocket:
+                try:
+                    # Echo back any messages received (optional)
+                    data = json.loads(message)
+                    print(f"Received message from client: {data}")
+                    
+                    # You can handle different message types here if needed
+                    if data.get("type") == "ping":
+                        response = {
+                            "type": "pong",
+                            "timestamp": asyncio.get_event_loop().time()
+                        }
+                        await websocket.send(json.dumps(response))
+                        
+                except json.JSONDecodeError:
+                    print(f"Received non-JSON message: {message}")
+                except Exception as e:
+                    print(f"Error handling message: {e}")
+                    
+        except websockets.exceptions.ConnectionClosed:
+            print("Client disconnected normally")
+        except Exception as e:
+            print(f"Error in connection handler: {e}")
         finally:
-            self.connected_clients.remove(websocket)
+            # Clean up when client disconnects
+            if websocket in self.connected_clients:
+                self.connected_clients.remove(websocket)
             print(f"AI client disconnected. Total clients: {len(self.connected_clients)}")
+
+    def _is_websocket_open(self, websocket):
+        """Check if websocket is open, handling different websockets library versions"""
+        try:
+            # Handle different ways websockets library exposes connection state
+            if hasattr(websocket, 'closed'):
+                return not websocket.closed
+            elif hasattr(websocket, 'close_code'):
+                return websocket.close_code is None
+            elif hasattr(websocket, 'state'):
+                # For newer websockets versions
+                return str(websocket.state) == "State.OPEN"
+            else:
+                # Fallback - assume it's open if we have a websocket object
+                return True
+        except Exception as e:
+            print(f"Error checking websocket state: {e}")
+            return False
 
     async def _broadcast_coro(self, data):
         """The async coroutine that sends data to all clients."""
         if self.connected_clients:
             message = json.dumps(data)
-            # Use asyncio.gather to send messages concurrently
-            await asyncio.gather(
-                *[client.send(message) for client in self.connected_clients],
-                return_exceptions=False
-            )
+            # Create a list of tasks for concurrent sending
+            tasks = []
+            clients_to_remove = set()
+            
+            for client in self.connected_clients.copy():
+                try:
+                    # Check if client is still connected using our compatibility method
+                    if not self._is_websocket_open(client):
+                        clients_to_remove.add(client)
+                        continue
+                    tasks.append(client.send(message))
+                except Exception as e:
+                    print(f"Error preparing to send to client: {e}")
+                    clients_to_remove.add(client)
+            
+            # Remove disconnected clients
+            for client in clients_to_remove:
+                self.connected_clients.discard(client)
+            
+            # Send messages concurrently to all connected clients
+            if tasks:
+                try:
+                    await asyncio.gather(*tasks, return_exceptions=True)
+                except Exception as e:
+                    print(f"Error broadcasting message: {e}")
 
     def broadcast(self, data):
         """
