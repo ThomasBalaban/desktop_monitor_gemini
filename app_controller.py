@@ -8,9 +8,10 @@ from websocket_server import WebSocketServer, WEBSOCKET_PORT
 import tkinter as tk
 
 class AppController:
-    def __init__(self):
+    def __init__(self, autostart=False):
         self.config = ConfigLoader()
-        print("Gemini Screen Watcher - Starting up in GUI mode...")
+        print("Gemini Screen Watcher - Starting up...")
+        self.autostart = autostart
         self.screen_capture = ScreenCapture(self.config.image_quality)
         self.gemini_client = GeminiClient(
             self.config.api_key, self.config.prompt, self.config.safety_settings,
@@ -32,7 +33,15 @@ class AppController:
             self.gui.update_status("ERROR: API_KEY not configured in config.py", "red")
             print("ERROR: API_KEY is not configured in config.py. Please set it and restart.")
             self.gui.add_error("API_KEY not configured in config.py.")
+        
         self.websocket_server.start()
+        
+        # If autostart is enabled, schedule the streaming to start shortly after the GUI loads
+        if self.autostart:
+            print("Autostart enabled. Streaming will begin shortly.")
+            # Use 'after' to ensure the GUI is fully initialized before starting
+            self.gui.root.after(1000, self.start_streaming)
+
         self.gui.run()
 
     def update_websocket_gui_status(self):
