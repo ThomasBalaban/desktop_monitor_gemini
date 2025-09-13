@@ -1,17 +1,18 @@
+import tkinter as tk
 from datetime import datetime
+import threading
+
 from config_loader import ConfigLoader
 from gemini_client import GeminiClient
 from screen_capture import ScreenCapture
 from streaming_manager import StreamingManager
 from app_gui import AppGUI
 from websocket_server import WebSocketServer, WEBSOCKET_PORT
-import tkinter as tk
 
 class AppController:
-    def __init__(self, autostart=False):
+    def __init__(self):
         self.config = ConfigLoader()
         print("Gemini Screen Watcher - Starting up...")
-        self.autostart = autostart
         self.screen_capture = ScreenCapture(self.config.image_quality)
         self.gemini_client = GeminiClient(
             self.config.api_key, self.config.prompt, self.config.safety_settings,
@@ -27,6 +28,7 @@ class AppController:
         self.current_response_buffer = ""
         self.gui = AppGUI(self)
         self._initialize_capture_region()
+        self.gui.root.after(2000, self._start_stream_on_init)
 
     def run(self):
         if not self.config.is_api_key_configured():
@@ -35,14 +37,34 @@ class AppController:
             self.gui.add_error("API_KEY not configured in config.py.")
         
         self.websocket_server.start()
-        
-        # If autostart is enabled, schedule the streaming to start shortly after the GUI loads
-        if self.autostart:
-            print("Autostart enabled. Streaming will begin shortly.")
-            # Use 'after' to ensure the GUI is fully initialized before starting
-            self.gui.root.after(1000, self.start_streaming)
-
         self.gui.run()
+
+    def _start_stream_on_init(self):
+        """Starts the streaming process automatically after GUI initialization."""
+        if not self.screen_capture.capture_region:
+            self.gui.update_status("Cannot start. No screen region is configured.", "red")
+            return
+        
+        def run_check_and_start():
+            print("Checking Gemini API connection...")
+            api_ok, message = self.gemini_client.test_connection()
+            self.gui.root.after(0, self._finalize_start, api_ok, message)
+        
+        self.gui.update_status("Checking API connection...", "orange")
+        threading.Thread(target=run_check_and_start, daemon=True).start()
+
+    def _finalize_start(self, api_ok, message):
+        """Finalizes the start process based on API check result."""
+        if not api_ok:
+            self.gui.add_error(f"API Connection Check Failed: {message}")
+            self.gui.update_status("API Check Failed", "red")
+            print("API Check Failed. Streaming will not start.")
+            return
+
+        print("API connection successful. Starting the screen streaming process...")
+        self.streaming_manager.start_streaming()
+        self.gui.update_status("Connecting...", "orange")
+        self.streaming_manager.set_status_callback(self.gui.update_status)
 
     def update_websocket_gui_status(self):
         self.gui.update_websocket_status(f"Running at ws://localhost:{WEBSOCKET_PORT}", "#4CAF50")
@@ -59,7 +81,6 @@ class AppController:
             self.gui.update_status(error_msg, "red")
             print(f"ERROR: {error_msg}")
             self.gui.add_error(error_msg)
-            self.gui.start_button.config(state=tk.DISABLED)
 
     def _on_gemini_response(self, text_chunk):
         self.current_response_buffer += text_chunk
@@ -81,23 +102,6 @@ class AppController:
     def _on_streaming_error(self, error_message):
         """Callback for errors from StreamingManager."""
         self.gui.add_error(f"Streaming Error: {error_message}")
-
-
-    def start_streaming(self):
-        if not self.screen_capture.capture_region:
-            self.gui.update_status("Cannot start. No screen region is configured.", "red")
-            return
-        print("Starting the screen streaming process...")
-        self.streaming_manager.start_streaming()
-        self.gui.update_status("Connecting...", "orange")
-        self.gui.update_button_states(is_streaming=True)
-        self.streaming_manager.set_status_callback(self.gui.update_status)
-
-    def stop_streaming(self):
-        print("Stopping the screen streaming process...")
-        self.streaming_manager.stop_streaming()
-        self.gui.update_status("Stopped", "red")
-        self.gui.update_button_states(is_streaming=False)
 
     def get_prompt(self):
         return self.config.prompt

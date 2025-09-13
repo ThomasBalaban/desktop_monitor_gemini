@@ -20,15 +20,6 @@ class AppGUI:
         main_frame.rowconfigure(3, weight=0) # New row for error log
         status_frame = tk.Frame(self.root, bg="#1E1E1E", padx=10, pady=5)
         status_frame.pack(fill=tk.X, side=tk.BOTTOM)
-        button_font = ("Helvetica", 12, "bold")
-        self.start_button = tk.Button(top_frame, text="Start Watching", command=self.controller.start_streaming,
-                                      bg="white", fg="black", font=button_font,
-                                      highlightbackground="#4CAF50", highlightthickness=2, bd=0, padx=10, pady=2)
-        self.start_button.pack(side=tk.LEFT, padx=5)
-        self.stop_button = tk.Button(top_frame, text="Stop Watching", command=self.controller.stop_streaming,
-                                     bg="white", fg="black", font=button_font, state=tk.DISABLED,
-                                     highlightbackground="#F44336", highlightthickness=2, bd=0, padx=10, pady=2)
-        self.stop_button.pack(side=tk.LEFT, padx=5)
         feed_label = tk.Label(main_frame, text="Live Gemini Feed", bg="#2E2E2E", fg="#FFFFFF", font=("Helvetica", 14, "bold"))
         feed_label.grid(row=0, column=0, sticky="w", pady=(0, 5))
         self.feed_text = scrolledtext.ScrolledText(main_frame, wrap=tk.WORD, state=tk.DISABLED, bg="#1E1E1E", fg="#E0E0E0", font=("Helvetica", 12))
@@ -45,7 +36,6 @@ class AppGUI:
         error_label.grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 5))
         self.error_text = scrolledtext.ScrolledText(main_frame, wrap=tk.WORD, state=tk.DISABLED, bg="#1E1E1E", fg="#FF7B7B", height=5)
         self.error_text.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(0, 10))
-
 
         self.status_label = tk.Label(status_frame, text="Status: Idle", bg="#1E1E1E", fg="#FFFFFF")
         self.status_label.pack(side=tk.LEFT)
@@ -96,7 +86,6 @@ class AppGUI:
             self.error_text.configure(state=tk.DISABLED)
         self.root.after(0, _task)
 
-
     def update_status(self, message, color="white"):
         def _task():
             self.status_label.config(text=f"Status: {message}", fg=color)
@@ -105,14 +94,4 @@ class AppGUI:
     def update_websocket_status(self, message, color="white"):
         def _task():
             self.websocket_status_label.config(text=f"WebSocket: {message}", fg=color)
-        self.root.after(0, _task)
-
-    def update_button_states(self, is_streaming):
-        def _task():
-            if is_streaming:
-                self.start_button.config(state=tk.DISABLED)
-                self.stop_button.config(state=tk.NORMAL)
-            else:
-                self.start_button.config(state=tk.NORMAL)
-                self.stop_button.config(state=tk.DISABLED)
         self.root.after(0, _task)

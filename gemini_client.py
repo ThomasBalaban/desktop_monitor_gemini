@@ -1,3 +1,4 @@
+# gemini_client.py
 import asyncio
 import json
 import requests # type: ignore
@@ -173,13 +174,22 @@ class GeminiClient:
 
     async def _cleanup_connection(self):
         self.is_connected = False
-        if self.websocket and not self.websocket.closed:
+        if self.websocket:
             try:
-                await asyncio.wait_for(self.websocket.close(), timeout=5.0)
+                if not self.websocket.closed:
+                    await asyncio.wait_for(self.websocket.close(), timeout=5.0)
+            except AttributeError:
+                self.debug_print("WebSocket object has no 'closed' attribute. It may be a different object type or an error state.")
             except Exception as e:
                 self.debug_print(f"Error closing websocket: {e}")
         self.websocket = None
 
     def is_healthy(self):
         """More robustly checks if the connection is active."""
-        return self.is_connected and self.websocket and not self.websocket.closed
+        if not self.is_connected or not self.websocket:
+            return False
+        try:
+            return not self.websocket.closed
+        except AttributeError:
+            # If the object doesn't have a '.closed' attribute, assume it's unhealthy.
+            return False
