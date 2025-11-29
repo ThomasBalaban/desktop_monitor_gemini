@@ -1,46 +1,72 @@
 import tkinter as tk
 from tkinter import scrolledtext, font
+from PIL import ImageTk, Image
 
 class AppGUI:
     def __init__(self, controller):
         self.controller = controller
         self.root = tk.Tk()
-        self.root.title("Gemini Screen Watcher")
-        self.root.geometry("900x850")  # Increased height for error log
+        self.root.title("Gemini 2.0 Unified Monitor")
+        self.root.geometry("1000x900")  # Wider for better preview
         self.root.configure(bg="#2E2E2E")
         self.default_font = font.nametofont("TkDefaultFont")
         self.default_font.configure(family="Helvetica", size=11)
+        
+        # --- Layout Frames ---
         top_frame = tk.Frame(self.root, bg="#2E2E2E", padx=10, pady=10)
         top_frame.pack(fill=tk.X)
+        
+        # PREVIEW AREA (New)
+        # Shows what the bot is actually looking at
+        self.preview_frame = tk.Frame(self.root, bg="#000000", height=300)
+        self.preview_frame.pack(fill=tk.X, padx=10, pady=5)
+        self.preview_frame.pack_propagate(False) # Force height
+        
+        self.preview_label = tk.Label(self.preview_frame, bg="black", text="Waiting for stream...", fg="gray", font=("Helvetica", 14))
+        self.preview_label.pack(expand=True, fill=tk.BOTH)
+        
+        # MAIN CONTENT
         main_frame = tk.Frame(self.root, bg="#2E2E2E", padx=10)
         main_frame.pack(fill=tk.BOTH, expand=True)
-        main_frame.columnconfigure(0, weight=3)
-        main_frame.columnconfigure(1, weight=2)
+        main_frame.columnconfigure(0, weight=1)
         main_frame.rowconfigure(1, weight=1)
-        main_frame.rowconfigure(3, weight=0) # New row for error log
+        
+        feed_label = tk.Label(main_frame, text="Gemini Thoughts", bg="#2E2E2E", fg="#FFFFFF", font=("Helvetica", 14, "bold"))
+        feed_label.grid(row=0, column=0, sticky="w", pady=(10, 5))
+        
+        self.feed_text = scrolledtext.ScrolledText(main_frame, wrap=tk.WORD, state=tk.DISABLED, bg="#1E1E1E", fg="#E0E0E0", font=("Helvetica", 12))
+        self.feed_text.grid(row=1, column=0, sticky="nsew", padx=(0, 0))
+        
+        # ERROR LOG (Optional, minimized)
+        self.error_text = scrolledtext.ScrolledText(main_frame, wrap=tk.WORD, state=tk.DISABLED, bg="#1E1E1E", fg="#FF7B7B", height=5)
+        self.error_text.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
+
+        # STATUS BAR
         status_frame = tk.Frame(self.root, bg="#1E1E1E", padx=10, pady=5)
         status_frame.pack(fill=tk.X, side=tk.BOTTOM)
-        feed_label = tk.Label(main_frame, text="Live Gemini Feed", bg="#2E2E2E", fg="#FFFFFF", font=("Helvetica", 14, "bold"))
-        feed_label.grid(row=0, column=0, sticky="w", pady=(0, 5))
-        self.feed_text = scrolledtext.ScrolledText(main_frame, wrap=tk.WORD, state=tk.DISABLED, bg="#1E1E1E", fg="#E0E0E0", font=("Helvetica", 12))
-        self.feed_text.grid(row=1, column=0, sticky="nsew", padx=(0, 10))
-        prompt_label = tk.Label(main_frame, text="Current Prompt", bg="#2E2E2E", fg="#FFFFFF", font=("Helvetica", 14, "bold"))
-        prompt_label.grid(row=0, column=1, sticky="w", pady=(0, 5))
-        self.prompt_text = scrolledtext.ScrolledText(main_frame, wrap=tk.WORD, bg="#1E1E1E", fg="#C5C5C5")
-        self.prompt_text.grid(row=1, column=1, sticky="nsew")
-        self.prompt_text.insert(tk.END, self.controller.get_prompt())
-        self.prompt_text.configure(state=tk.DISABLED)
-
-        # --- NEW: Error Log Section ---
-        error_label = tk.Label(main_frame, text="Error Log", bg="#2E2E2E", fg="#FFFFFF", font=("Helvetica", 14, "bold"))
-        error_label.grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 5))
-        self.error_text = scrolledtext.ScrolledText(main_frame, wrap=tk.WORD, state=tk.DISABLED, bg="#1E1E1E", fg="#FF7B7B", height=5)
-        self.error_text.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(0, 10))
-
+        
         self.status_label = tk.Label(status_frame, text="Status: Idle", bg="#1E1E1E", fg="#FFFFFF")
         self.status_label.pack(side=tk.LEFT)
         self.websocket_status_label = tk.Label(status_frame, text="WebSocket: Inactive", bg="#1E1E1E", fg="#FFFFFF")
         self.websocket_status_label.pack(side=tk.RIGHT)
+
+    def update_preview(self, pil_image):
+        """Updates the visual preview in the GUI"""
+        def _task():
+            # Resize for preview (keep aspect ratio, max height 300)
+            base_height = 300
+            
+            # Calculate width to maintain aspect ratio
+            w_percent = (base_height / float(pil_image.size[1]))
+            w_size = int((float(pil_image.size[0]) * float(w_percent)))
+            
+            img_resized = pil_image.resize((w_size, base_height), Image.Resampling.LANCZOS)
+            photo = ImageTk.PhotoImage(img_resized)
+            
+            self.preview_label.config(image=photo, text="")
+            self.preview_label.image = photo # Keep reference to prevent garbage collection
+            
+        self.root.after(0, _task)
 
     def run(self):
         self.root.after(100, self.controller.update_websocket_gui_status)

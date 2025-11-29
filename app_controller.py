@@ -20,13 +20,18 @@ class AppController:
         )
         self.streaming_manager = StreamingManager(
             self.screen_capture, self.gemini_client, self.config.fps,
-            restart_interval=30, debug_mode=self.config.debug_mode
+            restart_interval=1500, debug_mode=self.config.debug_mode
         )
         self.streaming_manager.set_restart_callback(self.on_stream_restart)
         self.streaming_manager.set_error_callback(self._on_streaming_error)
+        
         self.websocket_server = WebSocketServer()
         self.current_response_buffer = ""
         self.gui = AppGUI(self)
+        
+        # Connect the preview callback
+        self.streaming_manager.set_preview_callback(self.gui.update_preview)
+        
         self._initialize_capture_region()
         self.gui.root.after(2000, self._start_stream_on_init)
 
@@ -62,9 +67,9 @@ class AppController:
             return
 
         print("API connection successful. Starting the screen streaming process...")
+        self.streaming_manager.set_status_callback(self.gui.update_status)
         self.streaming_manager.start_streaming()
         self.gui.update_status("Connecting...", "orange")
-        self.streaming_manager.set_status_callback(self.gui.update_status)
 
     def update_websocket_gui_status(self):
         self.gui.update_websocket_status(f"Running at ws://localhost:{WEBSOCKET_PORT}", "#4CAF50")
@@ -84,7 +89,7 @@ class AppController:
 
     def _on_gemini_response(self, text_chunk):
         self.current_response_buffer += text_chunk
-        if self.current_response_buffer.strip().endswith(('.', '!', '?')):
+        if self.current_response_buffer.strip().endswith(('.', '!', '?', '\n')):
             final_text = self.current_response_buffer.strip()
             self.gui.add_response(final_text)
             response_data = {

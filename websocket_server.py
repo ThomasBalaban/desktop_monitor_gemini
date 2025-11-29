@@ -1,7 +1,8 @@
 import asyncio
 import json
 import threading
-import websockets # type: ignore
+import websockets
+import time
 
 WEBSOCKET_PORT = 8001
 
@@ -17,7 +18,21 @@ class WebSocketServer:
         """Starts the WebSocket server in a new thread."""
         thread = threading.Thread(target=self._run_server_in_thread, daemon=True)
         thread.start()
+        
+        # Start Heartbeat Thread (New)
+        threading.Thread(target=self._heartbeat_loop, daemon=True).start()
+        
         print(f"WebSocket server for AI clients starting on ws://localhost:{WEBSOCKET_PORT}")
+
+    def _heartbeat_loop(self):
+        """Sends a pulse every 5 seconds so clients know we are alive."""
+        while True:
+            time.sleep(5)
+            self.broadcast({
+                "type": "heartbeat",
+                "timestamp": time.time(),
+                "status": "active"
+            })
 
     def _run_server_in_thread(self):
         """Sets up and runs the asyncio event loop for the server."""
@@ -48,14 +63,9 @@ class WebSocketServer:
             await websocket.send(json.dumps(welcome_message))
             
             # Keep the connection alive by listening for messages
-            # This prevents the connection from closing immediately
             async for message in websocket:
                 try:
-                    # Echo back any messages received (optional)
                     data = json.loads(message)
-                    print(f"Received message from client: {data}")
-                    
-                    # You can handle different message types here if needed
                     if data.get("type") == "ping":
                         response = {
                             "type": "pong",
@@ -81,16 +91,13 @@ class WebSocketServer:
     def _is_websocket_open(self, websocket):
         """Check if websocket is open, handling different websockets library versions"""
         try:
-            # Handle different ways websockets library exposes connection state
             if hasattr(websocket, 'closed'):
                 return not websocket.closed
             elif hasattr(websocket, 'close_code'):
                 return websocket.close_code is None
             elif hasattr(websocket, 'state'):
-                # For newer websockets versions
                 return str(websocket.state) == "State.OPEN"
             else:
-                # Fallback - assume it's open if we have a websocket object
                 return True
         except Exception as e:
             print(f"Error checking websocket state: {e}")
@@ -100,13 +107,11 @@ class WebSocketServer:
         """The async coroutine that sends data to all clients."""
         if self.connected_clients:
             message = json.dumps(data)
-            # Create a list of tasks for concurrent sending
             tasks = []
             clients_to_remove = set()
             
             for client in self.connected_clients.copy():
                 try:
-                    # Check if client is still connected using our compatibility method
                     if not self._is_websocket_open(client):
                         clients_to_remove.add(client)
                         continue
@@ -115,11 +120,9 @@ class WebSocketServer:
                     print(f"Error preparing to send to client: {e}")
                     clients_to_remove.add(client)
             
-            # Remove disconnected clients
             for client in clients_to_remove:
                 self.connected_clients.discard(client)
             
-            # Send messages concurrently to all connected clients
             if tasks:
                 try:
                     await asyncio.gather(*tasks, return_exceptions=True)
@@ -127,12 +130,8 @@ class WebSocketServer:
                     print(f"Error broadcasting message: {e}")
 
     def broadcast(self, data):
-        """
-        Thread-safely broadcasts data to all connected clients.
-        This method is called from the main application thread.
-        """
+        """Thread-safely broadcasts data to all connected clients."""
         if self.loop and self.loop.is_running():
-            # Schedule the async broadcast task on the server's event loop
             asyncio.run_coroutine_threadsafe(
                 self._broadcast_coro(data),
                 self.loop
