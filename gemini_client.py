@@ -54,24 +54,20 @@ class GeminiClient:
             return await self._connect_with_fallback()
 
     async def _connect_with_fallback(self):
-        # Attempt 1: The "Modern" way (System Prompt in Setup)
         self.info_print("Attempt 1: Connecting with System Prompt in Setup...")
         success = await self._do_connect_attempt(use_system_instruction=True)
         
         if success:
             return True
             
-        # If Attempt 1 failed, wait briefly and try Attempt 2
-        self.info_print("⚠️ Attempt 1 failed (likely Error 1007). Retrying with Fallback Strategy...")
+        self.info_print("⚠️ Attempt 1 failed. Retrying with Fallback Strategy...")
         await asyncio.sleep(1)
         
-        # Attempt 2: The "Classic" way (Bare Setup + Prompt as Message)
         self.info_print("Attempt 2: Connecting with Bare Setup...")
         success = await self._do_connect_attempt(use_system_instruction=False)
         
         if success:
             self.info_print("✅ Fallback connection successful! Sending Prompt manually...")
-            # Manually send the prompt now
             await self._send_initial_prompt_message()
             return True
             
@@ -81,36 +77,32 @@ class GeminiClient:
     async def _do_connect_attempt(self, use_system_instruction=True):
         await self._cleanup_connection()
         try:
-            uri = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key={self.api_key}"
+            # Use v1beta (Correct for Gemini 2.0)
+            uri = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={self.api_key}"
+            
             self.websocket = await asyncio.wait_for(
                 websockets.connect(uri, ping_interval=20, ping_timeout=10),
                 timeout=15.0
             )
             
-            # Construct Setup Message
+            # Setup Message (camelCase for v1beta)
             setup_payload = {
                 "setup": {
                     "model": "models/gemini-2.0-flash-exp",
-                    "generation_config": {
-                        "response_modalities": ["TEXT"],
-                        "max_output_tokens": self.max_output_tokens
+                    "generationConfig": {
+                        "responseModalities": ["TEXT"],
+                        "maxOutputTokens": self.max_output_tokens
                     }
                 }
             }
             
-            # Conditionally add System Instruction
             if use_system_instruction:
-                setup_payload["setup"]["system_instruction"] = {
+                setup_payload["setup"]["systemInstruction"] = {
                     "parts": [{"text": self.prompt}]
                 }
-                
-            if self.safety_settings:
-                setup_payload["setup"]["safety_settings"] = self.safety_settings
             
-            # Send Setup
             await self.websocket.send(json.dumps(setup_payload))
             
-            # Wait for setup confirmation
             response = await asyncio.wait_for(
                 self.websocket.recv(),
                 timeout=15.0
@@ -118,6 +110,7 @@ class GeminiClient:
             setup_response = json.loads(response)
             
             if "setupComplete" in setup_response:
+                self.info_print("Gemini Setup Complete.")
                 self.is_connected = True
                 return True
             else:
@@ -125,23 +118,22 @@ class GeminiClient:
                 return False
                 
         except websockets.exceptions.ConnectionClosed as e:
-            self.debug_print(f"Connection closed immediately: Code {e.code} ({e.reason})")
+            self.debug_print(f"Connection closed during setup: Code {e.code} ({e.reason})")
             return False
         except Exception as e:
             self.debug_print(f"Connection exception: {e}")
             return False
 
     async def _send_initial_prompt_message(self):
-        """Sends the system prompt as a normal user message (Fallback method)."""
         if not self.is_connected: return
         try:
             msg = {
-                "client_content": {
+                "clientContent": {
                     "turns": [{
                         "role": "user",
                         "parts": [{"text": f"SYSTEM INSTRUCTIONS: {self.prompt}"}]
                     }],
-                    "turn_complete": False
+                    "turnComplete": False
                 }
             }
             await self.websocket.send(json.dumps(msg))
@@ -150,51 +142,61 @@ class GeminiClient:
 
     async def send_multimodal_frame(self, base64_image, audio_bytes=None, turn_complete=False, text=None):
         """
-        Sends audio/video data via 'realtime_input' and text triggers via 'client_content'.
-        This split is required to avoid 1007 errors on the Gemini Live API.
+        Hybrid Approach:
+        - Audio -> realtimeInput (required for streaming)
+        - Video -> clientContent (inline_data) (mimics old working code)
+        - Text -> clientContent
         """
         if not self.is_connected or not self.websocket:
             return False
 
         try:
-            # 1. Manual Text Trigger (Always use client_content for text)
-            if text:
-                msg = {
-                    "client_content": {
-                        "turns": [{"role": "user", "parts": [{"text": text}]}],
-                        "turn_complete": True
-                    }
-                }
-                await self.websocket.send(json.dumps(msg))
-                return True
-
-            # 2. Streaming Media (Use realtime_input for Audio/Video)
-            chunks = []
+            # 1. Send Audio via realtimeInput (Streaming)
             if audio_bytes:
                 base64_audio = base64.b64encode(audio_bytes).decode('utf-8')
-                chunks.append({
-                    "mime_type": "audio/pcm",  # <--- CRITICAL FIX: No rate param allowed here
-                    "data": base64_audio
+                audio_msg = {
+                    "realtimeInput": {
+                        "mediaChunks": [{
+                            "mimeType": f"audio/pcm;rate={self.audio_sample_rate}",
+                            "data": base64_audio
+                        }]
+                    }
+                }
+                await self.websocket.send(json.dumps(audio_msg))
+
+            # 2. Construct Client Content (Video + Text + Trigger)
+            # We bundle these into a single 'clientContent' message to emulate a "Turn"
+            parts = []
+            
+            if text:
+                parts.append({"text": text})
+
+            # Send Image as Inline Data (The "Old Way" that worked)
+            if base64_image:
+                parts.append({
+                    "inlineData": {
+                        "mimeType": "image/jpeg",
+                        "data": base64_image
+                    }
                 })
 
-            if base64_image:
-                chunks.append({
-                    "mime_type": "image/jpeg",
-                    "data": base64_image
-                })
-            
-            if chunks:
+            # If we have content to send as a Turn
+            if parts:
                 msg = {
-                    "realtime_input": {
-                        "media_chunks": chunks
+                    "clientContent": {
+                        "turns": [{
+                            "role": "user",
+                            "parts": parts
+                        }],
+                        "turnComplete": turn_complete 
                     }
                 }
                 await self.websocket.send(json.dumps(msg))
-
-            # 3. Trigger Response (Logic to force model to speak if turn is complete)
-            if turn_complete:
-                await self.websocket.send(json.dumps({
-                    "client_content": { "turn_complete": True }
+            
+            # If we strictly have NO parts but need to trigger a turn complete (e.g. audio only trigger)
+            elif turn_complete:
+                 await self.websocket.send(json.dumps({
+                    "clientContent": { "turnComplete": True }
                 }))
             
             return True
@@ -217,10 +219,6 @@ class GeminiClient:
                     
                     if "serverContent" in data:
                         content = data["serverContent"]
-                        
-                        if "modelTurn" not in content:
-                            if "turnComplete" in content:
-                                continue
                         
                         if "modelTurn" in content:
                             parts = content["modelTurn"].get("parts", [])
