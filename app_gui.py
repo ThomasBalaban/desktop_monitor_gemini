@@ -7,7 +7,7 @@ class AppGUI:
         self.controller = controller
         self.root = tk.Tk()
         self.root.title("Gemini 2.0 Unified Monitor")
-        self.root.geometry("1000x900")  # Wider for better preview
+        self.root.geometry("1000x900")
         self.root.configure(bg="#2E2E2E")
         self.default_font = font.nametofont("TkDefaultFont")
         self.default_font.configure(family="Helvetica", size=11)
@@ -16,11 +16,18 @@ class AppGUI:
         top_frame = tk.Frame(self.root, bg="#2E2E2E", padx=10, pady=10)
         top_frame.pack(fill=tk.X)
         
-        # PREVIEW AREA (New)
-        # Shows what the bot is actually looking at
+        # Add Analysis Button (New)
+        self.btn_analyze = tk.Button(top_frame, text="Analyze Last 5s", 
+                                     command=self.controller.request_analysis, 
+                                     bg="#4CAF50", fg="white", 
+                                     font=("Helvetica", 10, "bold"),
+                                     relief=tk.FLAT, padx=10)
+        self.btn_analyze.pack(side=tk.RIGHT)
+        
+        # PREVIEW AREA
         self.preview_frame = tk.Frame(self.root, bg="#000000", height=300)
         self.preview_frame.pack(fill=tk.X, padx=10, pady=5)
-        self.preview_frame.pack_propagate(False) # Force height
+        self.preview_frame.pack_propagate(False) 
         
         self.preview_label = tk.Label(self.preview_frame, bg="black", text="Waiting for stream...", fg="gray", font=("Helvetica", 14))
         self.preview_label.pack(expand=True, fill=tk.BOTH)
@@ -37,7 +44,6 @@ class AppGUI:
         self.feed_text = scrolledtext.ScrolledText(main_frame, wrap=tk.WORD, state=tk.DISABLED, bg="#1E1E1E", fg="#E0E0E0", font=("Helvetica", 12))
         self.feed_text.grid(row=1, column=0, sticky="nsew", padx=(0, 0))
         
-        # ERROR LOG (Optional, minimized)
         self.error_text = scrolledtext.ScrolledText(main_frame, wrap=tk.WORD, state=tk.DISABLED, bg="#1E1E1E", fg="#FF7B7B", height=5)
         self.error_text.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
 
@@ -51,12 +57,8 @@ class AppGUI:
         self.websocket_status_label.pack(side=tk.RIGHT)
 
     def update_preview(self, pil_image):
-        """Updates the visual preview in the GUI"""
         def _task():
-            # Resize for preview (keep aspect ratio, max height 300)
             base_height = 300
-            
-            # Calculate width to maintain aspect ratio
             w_percent = (base_height / float(pil_image.size[1]))
             w_size = int((float(pil_image.size[0]) * float(w_percent)))
             
@@ -64,8 +66,7 @@ class AppGUI:
             photo = ImageTk.PhotoImage(img_resized)
             
             self.preview_label.config(image=photo, text="")
-            self.preview_label.image = photo # Keep reference to prevent garbage collection
-            
+            self.preview_label.image = photo 
         self.root.after(0, _task)
 
     def run(self):
@@ -104,7 +105,6 @@ class AppGUI:
         self.root.after(0, _task)
 
     def add_error(self, text):
-        """Adds an error message to the error log."""
         def _task():
             self.error_text.configure(state=tk.NORMAL)
             timestamp = self.controller.get_timestamp()

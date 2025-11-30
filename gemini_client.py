@@ -59,13 +59,16 @@ class GeminiClient:
             )
             self.debug_print("WebSocket connected successfully")
             
-            # 1. Send Setup Message
+            # 1. Send Setup Message (With System Instruction)
             setup_message = {
                 "setup": {
                     "model": "models/gemini-2.0-flash-exp",
                     "generation_config": {
                         "response_modalities": ["TEXT"],
                         "max_output_tokens": self.max_output_tokens
+                    },
+                    "system_instruction": {
+                        "parts": [{"text": self.prompt}]
                     }
                 }
             }
@@ -87,19 +90,6 @@ class GeminiClient:
             if "setupComplete" in setup_response:
                 self.is_connected = True
                 self.info_print("Gemini connection established successfully")
-                
-                # 2. Send System Prompt IMMEDIATELY as the first "User" message
-                # This establishes the context for the whole session
-                initial_prompt = {
-                    "client_content": {
-                        "turns": [{
-                            "role": "user",
-                            "parts": [{"text": self.prompt}]
-                        }],
-                        "turn_complete": False # Don't force a reply to the system prompt
-                    }
-                }
-                await self.websocket.send(json.dumps(initial_prompt))
                 return True
             else:
                 self.info_print(f"Setup failed: {setup_response}")
@@ -114,19 +104,26 @@ class GeminiClient:
             await self._cleanup_connection()
             return False
 
-    async def send_multimodal_frame(self, base64_image, audio_bytes=None, turn_complete=False):
+    async def send_multimodal_frame(self, base64_image, audio_bytes=None, turn_complete=False, text=None):
+        """
+        Sends a frame with optional audio and optional text prompt.
+        """
         if not self.is_connected or not self.websocket:
             return False
 
         try:
             parts = []
             
+            # Add Manual Text Prompt (if requested)
+            if text:
+                parts.append({"text": text})
+            
             # Add Audio (if available)
             if audio_bytes:
                 base64_audio = base64.b64encode(audio_bytes).decode('utf-8')
                 parts.append({
                     "inline_data": {
-                        "mime_type": "audio/pcm;rate=16000", # Must match AudioCapture
+                        "mime_type": "audio/pcm;rate=16000", 
                         "data": base64_audio
                     }
                 })
@@ -139,6 +136,10 @@ class GeminiClient:
                         "data": base64_image
                     }
                 })
+            
+            # If we have no data to send, skip
+            if not parts:
+                return True
 
             message = {
                 "client_content": {
@@ -165,34 +166,25 @@ class GeminiClient:
                     response = await asyncio.wait_for(self.websocket.recv(), timeout=30.0)
                     data = json.loads(response)
                     
-                    # --- SAFETY & EMPTY TURN HANDLING ---
                     if "serverContent" in data:
                         content = data["serverContent"]
                         
-                        # Check if the model refused to answer (Safety Filter) or just finished empty
                         if "modelTurn" not in content:
                             if "turnComplete" in content:
-                                # Turn ended without text. This is normal for Silent Stream 
-                                # OR it means the frame was blocked by safety filters.
-                                # We just ignore it and continue.
                                 continue
                         
-                        # Handle Valid Text
                         if "modelTurn" in content:
                             parts = content["modelTurn"].get("parts", [])
                             for part in parts:
                                 if "text" in part and self.response_callback:
                                     text = part["text"]
-                                    # Filter out the "WAIT" token we taught it
                                     if "[WAIT]" not in text:
                                         self.response_callback(text)
                                         
                 except asyncio.TimeoutError:
-                    self.debug_print("Response timeout - connection may be stale (or just silent)")
-                    # We don't disconnect on timeout anymore because silence is expected
                     continue
-                except websockets.exceptions.ConnectionClosed:
-                    self.info_print("WebSocket connection closed")
+                except websockets.exceptions.ConnectionClosed as e:
+                    self.info_print(f"WebSocket closed: {e.code} - {e.reason}")
                     self.is_connected = False
                     break
                 except Exception as e:

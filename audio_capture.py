@@ -15,7 +15,6 @@ class AudioCapture:
         self.lock = threading.Lock()
         
         # Audio threshold for "Hearing something" (RMS)
-        # Adjust this if it triggers too easily or not enough
         self.silence_threshold = 0.01
 
     def _callback(self, indata, frames, time, status):
@@ -58,19 +57,30 @@ class AudioCapture:
         Returns: (bytes, is_loud)
         """
         frames = []
+        # Consume all available chunks
         while not self.audio_queue.empty():
             frames.append(self.audio_queue.get())
         
+        # If no audio captured yet, return None
         if not frames:
             return None, False
 
-        # Concatenate all chunks
-        audio_data = np.concatenate(frames, axis=0)
-        
-        # Calculate Volume (RMS) to decide if we should trigger a "Turn"
-        # Normalize int16 to float -1..1 for calculation
-        audio_float = audio_data.astype(np.float32) / 32768.0
-        rms = np.sqrt(np.mean(audio_float**2))
-        is_loud = rms > self.silence_threshold
+        try:
+            # Concatenate all chunks
+            audio_data = np.concatenate(frames, axis=0)
+            
+            # Check length - if it's too small (under 100ms), ignore it to prevent headers spam
+            if len(audio_data) < 1600: # 1600 samples = 0.1s at 16k
+                return None, False
 
-        return audio_data.tobytes(), is_loud
+            # Calculate Volume (RMS)
+            # Normalize int16 to float -1..1 for calculation
+            audio_float = audio_data.astype(np.float32) / 32768.0
+            rms = np.sqrt(np.mean(audio_float**2))
+            is_loud = rms > self.silence_threshold
+
+            return audio_data.tobytes(), is_loud
+            
+        except Exception as e:
+            print(f"Audio processing error: {e}")
+            return None, False

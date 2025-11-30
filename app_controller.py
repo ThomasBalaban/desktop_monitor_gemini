@@ -29,7 +29,6 @@ class AppController:
         self.current_response_buffer = ""
         self.gui = AppGUI(self)
         
-        # Connect the preview callback
         self.streaming_manager.set_preview_callback(self.gui.update_preview)
         
         self._initialize_capture_region()
@@ -44,8 +43,16 @@ class AppController:
         self.websocket_server.start()
         self.gui.run()
 
+    # --- New Method for Manual Analysis ---
+    def request_analysis(self):
+        """Manually triggers the AI to analyze the recent context."""
+        print("Manual analysis triggered.")
+        self.gui.update_status("Requesting Analysis...", "cyan")
+        self.streaming_manager.trigger_manual_analysis(
+            "Analyze the audio and video from the last 5 seconds. Describe exactly what happened."
+        )
+
     def _start_stream_on_init(self):
-        """Starts the streaming process automatically after GUI initialization."""
         if not self.screen_capture.capture_region:
             self.gui.update_status("Cannot start. No screen region is configured.", "red")
             return
@@ -59,7 +66,6 @@ class AppController:
         threading.Thread(target=run_check_and_start, daemon=True).start()
 
     def _finalize_start(self, api_ok, message):
-        """Finalizes the start process based on API check result."""
         if not api_ok:
             self.gui.add_error(f"API Connection Check Failed: {message}")
             self.gui.update_status("API Check Failed", "red")
@@ -101,11 +107,9 @@ class AppController:
             self.current_response_buffer = ""
 
     def _on_gemini_error(self, error_message):
-        """Callback for errors from GeminiClient."""
         self.gui.add_error(f"Gemini API Error: {error_message}")
 
     def _on_streaming_error(self, error_message):
-        """Callback for errors from StreamingManager."""
         self.gui.add_error(f"Streaming Error: {error_message}")
 
     def get_prompt(self):

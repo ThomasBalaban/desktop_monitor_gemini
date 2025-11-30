@@ -32,6 +32,10 @@ class StreamingManager:
         self.last_pulse_time = 0
         self.pulse_interval = 10.0 # Ask AI "anything new?" every 10s if quiet
         
+        # New: Manual Trigger Store
+        self.manual_trigger_text = None
+        self.trigger_lock = threading.Lock()
+        
         # Tasks
         self.streaming_task = None
         self.listener_task = None
@@ -54,6 +58,12 @@ class StreamingManager:
     def _report_error(self, message):
         if self.error_callback:
             self.error_callback(message)
+            
+    def trigger_manual_analysis(self, text):
+        """Queues a text prompt to be sent with the NEXT frame."""
+        with self.trigger_lock:
+            self.manual_trigger_text = text
+        self.info_print(f"Manual analysis queued: {text}")
 
     def start_streaming(self):
         if self.state != StreamingState.STOPPED:
@@ -136,6 +146,10 @@ class StreamingManager:
                 self.state = StreamingState.STREAMING
                 self._update_status("Watching (Silent Mode)", "green")
                 
+                # --- NEW: Give the connection a moment to settle ---
+                await asyncio.sleep(1.0) 
+                # ---------------------------------------------------
+                
                 self.listener_task = asyncio.create_task(self.gemini_client.listen_for_responses())
                 self.streaming_task = asyncio.create_task(self._streaming_loop())
                 
@@ -177,20 +191,31 @@ class StreamingManager:
                     
                     turn_complete = False
                     
-                    if is_loud:
-                        # Sound detected -> Trigger check
-                        turn_complete = True
-                        self.last_pulse_time = current_time
-                        if self.debug_mode: print("Trigger: Audio Detected")
-                        
-                    elif time_since_pulse > self.pulse_interval:
-                        # Timer expired -> Trigger pulse
-                        turn_complete = True
-                        self.last_pulse_time = current_time
-                        if self.debug_mode: print("Trigger: Pulse Check")
+                    # Check for Manual Trigger (High Priority)
+                    manual_text = None
+                    with self.trigger_lock:
+                        if self.manual_trigger_text:
+                            manual_text = self.manual_trigger_text
+                            turn_complete = True
+                            self.manual_trigger_text = None # consume it
+                            self.last_pulse_time = current_time
+                    
+                    # Normal Triggers (only if no manual trigger)
+                    if not turn_complete:
+                        if is_loud:
+                            # Sound detected -> Trigger check
+                            turn_complete = True
+                            self.last_pulse_time = current_time
+                            if self.debug_mode: print("Trigger: Audio Detected")
+                            
+                        elif time_since_pulse > self.pulse_interval:
+                            # Timer expired -> Trigger pulse
+                            turn_complete = True
+                            self.last_pulse_time = current_time
+                            if self.debug_mode: print("Trigger: Pulse Check")
 
                     # 4. Send Data
-                    await self.gemini_client.send_multimodal_frame(base64_image, audio_bytes, turn_complete)
+                    await self.gemini_client.send_multimodal_frame(base64_image, audio_bytes, turn_complete, text=manual_text)
                 
                 # 5. Session Time Limit Check (25 mins)
                 if self.session_start_time and (time.time() - self.session_start_time) >= self.restart_interval:
