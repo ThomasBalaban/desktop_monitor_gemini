@@ -53,31 +53,34 @@ class AudioCapture:
 
     def get_recent_audio(self):
         """
-        Retrieves all audio accumulated since the last call.
-        Returns: (bytes, is_loud)
+        Retrieves audio and prints a volume meter for debugging.
         """
         frames = []
-        # Consume all available chunks
         while not self.audio_queue.empty():
             frames.append(self.audio_queue.get())
         
-        # If no audio captured yet, return None
         if not frames:
             return None, False
 
         try:
-            # Concatenate all chunks
             audio_data = np.concatenate(frames, axis=0)
             
-            # Check length - if it's too small (under 100ms), ignore it to prevent headers spam
-            if len(audio_data) < 1600: # 1600 samples = 0.1s at 16k
+            if len(audio_data) < 1600: 
                 return None, False
 
-            # Calculate Volume (RMS)
-            # Normalize int16 to float -1..1 for calculation
+            # Calculate RMS
             audio_float = audio_data.astype(np.float32) / 32768.0
             rms = np.sqrt(np.mean(audio_float**2))
             is_loud = rms > self.silence_threshold
+
+            # --- DEBUG VOLUME METER ---
+            # Create a visual bar based on volume
+            bars = int(rms * 1000) 
+            # Cap at 50 bars for display
+            display_bars = '|' * min(bars, 50)
+            if bars > 0:
+                print(f"🔊 Level: {rms:.4f} {display_bars}")
+            # --------------------------
 
             return audio_data.tobytes(), is_loud
             
