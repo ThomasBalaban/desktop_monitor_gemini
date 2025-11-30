@@ -14,10 +14,20 @@ class AppController:
         self.config = ConfigLoader()
         print("Gemini Screen Watcher - Starting up...")
         self.screen_capture = ScreenCapture(self.config.image_quality)
+        
+        # --- PASS SAMPLE RATE HERE ---
         self.gemini_client = GeminiClient(
-            self.config.api_key, self.config.prompt, self.config.safety_settings,
-            self._on_gemini_response, self._on_gemini_error, self.config.max_output_tokens, self.config.debug_mode
+            self.config.api_key, 
+            self.config.prompt, 
+            self.config.safety_settings,
+            self._on_gemini_response, 
+            self._on_gemini_error, 
+            self.config.max_output_tokens, 
+            self.config.debug_mode,
+            audio_sample_rate=self.config.audio_sample_rate # <--- Passed from Config
         )
+        # -----------------------------
+
         self.streaming_manager = StreamingManager(
             self.screen_capture, self.gemini_client, self.config.fps,
             restart_interval=1500, debug_mode=self.config.debug_mode
@@ -43,7 +53,6 @@ class AppController:
         self.websocket_server.start()
         self.gui.run()
 
-    # --- New Method for Manual Analysis ---
     def request_analysis(self):
         """Manually triggers the AI to analyze the recent context."""
         print("Manual analysis triggered.")

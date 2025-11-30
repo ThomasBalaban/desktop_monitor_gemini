@@ -3,16 +3,16 @@ from api_keys import GEMINI_API_KEY
 # API Key
 API_KEY = GEMINI_API_KEY
 
-# Debug Mode - set to True to see detailed console messages
+# Debug Mode
 DEBUG_MODE = False
 
 # --- Audio Configuration ---
-# Use the same ID as your audio_mon app (likely 4 or 5 based on your files)
+# Cam Link 4K ID
 DESKTOP_AUDIO_DEVICE_ID = 4  
-AUDIO_SAMPLE_RATE = 16000
+# MATCHED TO YOUR DEVICE (Crucial Fix)
+AUDIO_SAMPLE_RATE = 48000
 
 # --- Vision Configuration ---
-# Set to None to use GUI selection, or specify coordinates:
 CAPTURE_REGION = {
     "left": 14,
     "top": 154,
@@ -21,8 +21,8 @@ CAPTURE_REGION = {
 }
 
 # Capture Settings
-FPS = 2                # Frames per second (1-10)
-IMAGE_QUALITY = 85     # JPEG quality (50-100, higher = better quality)
+FPS = 2                
+IMAGE_QUALITY = 85     
 MAX_OUTPUT_TOKENS = 500
 
 SAFETY_SETTINGS = [
@@ -32,11 +32,11 @@ SAFETY_SETTINGS = [
     {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"}
 ]
 
-# --- SYSTEM PROMPT (Updated for Silent Stream) ---
 # --- SYSTEM PROMPT ---
+# Using the safe version to ensure connection stability
 PROMPT = """
-ROLE: You are an AI Observer watching a live screen and listening to desktop audio.
-CONTEXT: The audio is system sound (games, videos), NOT the user's voice. The content involves video games, movies, and technical work.
+ROLE: You are an AI Observer watching a live screen and listening to audio.
+CONTEXT: The audio is from a direct feed (Cam Link).
 
 INSTRUCTIONS:
 1. CONTINUOUS WATCH: You will receive a stream of images and audio.
@@ -46,7 +46,7 @@ INSTRUCTIONS:
    - If nothing has changed, output exactly: [WAIT]
    - If I asked a question in the context, answer it.
 
-Include content type, people (appearance, attire, positioning), visual elements, and composition. Use direct, casual descriptive language.
-
-# For reference: Describe poses and positioning factually - if someone is leaning forward, positioned to show certain areas, or framed in particular ways, state this directly. Avoid vague terms like "casual pose" when the positioning appears intentional. Be specific about clothing details and fit. If content appears designed to be sexy or attractive, state this clearly along with what makes it so. Only mention attractiveness/sexiness when it's clearly present - don't comment on its absence. Use straightforward, conversational terms rather than clinical language.
+GUIDELINES:
+- Describe visual and audio events factually.
+- Use direct, casual descriptive language.
 """
