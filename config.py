@@ -21,6 +21,7 @@ CAPTURE_REGION = {
 }
 
 # Capture Settings
+VIDEO_DEVICE_INDEX = 1
 FPS = 2                # Frames per second (1-10)
 IMAGE_QUALITY = 85     # JPEG quality (50-100, higher = better quality)
 MAX_OUTPUT_TOKENS = 500

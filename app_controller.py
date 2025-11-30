@@ -13,9 +13,13 @@ class AppController:
     def __init__(self):
         self.config = ConfigLoader()
         print("Gemini Screen Watcher - Starting up...")
-        self.screen_capture = ScreenCapture(self.config.image_quality)
         
-        # --- PASS SAMPLE RATE HERE ---
+        # --- PASS VIDEO INDEX HERE ---
+        self.screen_capture = ScreenCapture(
+            self.config.image_quality, 
+            video_index=self.config.video_device_index
+        )
+        
         self.gemini_client = GeminiClient(
             self.config.api_key, 
             self.config.prompt, 
@@ -24,9 +28,8 @@ class AppController:
             self._on_gemini_error, 
             self.config.max_output_tokens, 
             self.config.debug_mode,
-            audio_sample_rate=self.config.audio_sample_rate # <--- Passed from Config
+            audio_sample_rate=self.config.audio_sample_rate
         )
-        # -----------------------------
 
         self.streaming_manager = StreamingManager(
             self.screen_capture, self.gemini_client, self.config.fps,
@@ -41,20 +44,21 @@ class AppController:
         
         self.streaming_manager.set_preview_callback(self.gui.update_preview)
         
-        self._initialize_capture_region()
+        # Only init region if we are NOT using a camera
+        if self.config.video_device_index is None:
+            self._initialize_capture_region()
+            
         self.gui.root.after(2000, self._start_stream_on_init)
 
     def run(self):
         if not self.config.is_api_key_configured():
-            self.gui.update_status("ERROR: API_KEY not configured in config.py", "red")
-            print("ERROR: API_KEY is not configured in config.py. Please set it and restart.")
-            self.gui.add_error("API_KEY not configured in config.py.")
+            self.gui.update_status("ERROR: API_KEY not configured", "red")
+            self.gui.add_error("API_KEY not configured.")
         
         self.websocket_server.start()
         self.gui.run()
 
     def request_analysis(self):
-        """Manually triggers the AI to analyze the recent context."""
         print("Manual analysis triggered.")
         self.gui.update_status("Requesting Analysis...", "cyan")
         self.streaming_manager.trigger_manual_analysis(
@@ -62,8 +66,10 @@ class AppController:
         )
 
     def _start_stream_on_init(self):
-        if not self.screen_capture.capture_region:
-            self.gui.update_status("Cannot start. No screen region is configured.", "red")
+        # Check readiness instead of just region
+        if not self.screen_capture.is_ready():
+            self.gui.update_status("Cannot start. No source configured.", "red")
+            print("ERROR: No Camera Index AND No Screen Region set.")
             return
         
         def run_check_and_start():
@@ -78,10 +84,9 @@ class AppController:
         if not api_ok:
             self.gui.add_error(f"API Connection Check Failed: {message}")
             self.gui.update_status("API Check Failed", "red")
-            print("API Check Failed. Streaming will not start.")
             return
 
-        print("API connection successful. Starting the screen streaming process...")
+        print("API connection successful. Starting streaming...")
         self.streaming_manager.set_status_callback(self.gui.update_status)
         self.streaming_manager.start_streaming()
         self.gui.update_status("Connecting...", "orange")
@@ -97,10 +102,7 @@ class AppController:
             self.screen_capture.set_capture_region(self.config.capture_region)
             print(f"Using capture region from config: {self.config.get_region_description()}")
         else:
-            error_msg = "No capture region set in config.py"
-            self.gui.update_status(error_msg, "red")
-            print(f"ERROR: {error_msg}")
-            self.gui.add_error(error_msg)
+            print("No capture region set (will rely on GUI if not using camera)")
 
     def _on_gemini_response(self, text_chunk):
         self.current_response_buffer += text_chunk
