@@ -149,46 +149,54 @@ class GeminiClient:
             self.debug_print(f"Failed to send initial prompt: {e}")
 
     async def send_multimodal_frame(self, base64_image, audio_bytes=None, turn_complete=False, text=None):
+        """
+        Sends audio/video data via 'realtime_input' and text triggers via 'client_content'.
+        This split is required to avoid 1007 errors on the Gemini Live API.
+        """
         if not self.is_connected or not self.websocket:
             return False
 
         try:
-            parts = []
-            
+            # 1. Manual Text Trigger (Always use client_content for text)
             if text:
-                parts.append({"text": text})
-            
+                msg = {
+                    "client_content": {
+                        "turns": [{"role": "user", "parts": [{"text": text}]}],
+                        "turn_complete": True
+                    }
+                }
+                await self.websocket.send(json.dumps(msg))
+                return True
+
+            # 2. Streaming Media (Use realtime_input for Audio/Video)
+            chunks = []
             if audio_bytes:
                 base64_audio = base64.b64encode(audio_bytes).decode('utf-8')
-                parts.append({
-                    "inline_data": {
-                        "mime_type": f"audio/pcm;rate={self.audio_sample_rate}", 
-                        "data": base64_audio
-                    }
+                chunks.append({
+                    "mime_type": "audio/pcm",  # <--- CRITICAL FIX: No rate param allowed here
+                    "data": base64_audio
                 })
 
             if base64_image:
-                parts.append({
-                    "inline_data": {
-                        "mime_type": "image/jpeg",
-                        "data": base64_image
-                    }
+                chunks.append({
+                    "mime_type": "image/jpeg",
+                    "data": base64_image
                 })
             
-            if not parts:
-                return True
-
-            message = {
-                "client_content": {
-                    "turns": [{
-                        "role": "user",
-                        "parts": parts
-                    }],
-                    "turn_complete": turn_complete 
+            if chunks:
+                msg = {
+                    "realtime_input": {
+                        "media_chunks": chunks
+                    }
                 }
-            }
+                await self.websocket.send(json.dumps(msg))
+
+            # 3. Trigger Response (Logic to force model to speak if turn is complete)
+            if turn_complete:
+                await self.websocket.send(json.dumps({
+                    "client_content": { "turn_complete": True }
+                }))
             
-            await self.websocket.send(json.dumps(message))
             return True
             
         except websockets.exceptions.ConnectionClosed:
