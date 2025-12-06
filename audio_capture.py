@@ -73,14 +73,14 @@ class AudioCapture:
             rms = np.sqrt(np.mean(audio_float**2))
             is_loud = rms > self.silence_threshold
 
-            # --- DEBUG VOLUME METER ---
-            # Create a visual bar based on volume
-            bars = int(rms * 1000) 
-            # Cap at 50 bars for display
-            display_bars = '|' * min(bars, 50)
-            if bars > 0:
-                print(f"🔊 Level: {rms:.4f} {display_bars}")
-            # --------------------------
+            # # --- DEBUG VOLUME METER ---
+            # # Create a visual bar based on volume
+            # bars = int(rms * 1000) 
+            # # Cap at 50 bars for display
+            # display_bars = '|' * min(bars, 50)
+            # if bars > 0:
+            #     print(f"🔊 Level: {rms:.4f} {display_bars}")
+            # # --------------------------
 
             return audio_data.tobytes(), is_loud
             
