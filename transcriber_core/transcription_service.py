@@ -51,9 +51,20 @@ class TranscriptionDeduplicator:
     def process(self, text, source):
         """
         Process a transcription and decide whether to skip, merge, or output.
-        Returns: (should_output, final_text)
+        Returns: (should_output, final_text, is_partial)
         """
         current_time = time.time()
+        is_partial = False
+        
+        # --- NEW LOGIC: Handle live partial updates instantly ---
+        # The transcriber sends the source 'desktop_partial' for live word updates
+        if source.endswith("_partial"):
+            is_partial = True
+            # Immediately output partial updates without updating history
+            return True, text, is_partial 
+        # --- END NEW LOGIC ---
+        
+        # Logic for FINAL/FULL results (source is "microphone" or "desktop")
         
         # Get most recent from this source
         if source in self.recent_transcripts:
@@ -63,20 +74,20 @@ class TranscriptionDeduplicator:
             if current_time - prev_timestamp > self.time_window:
                 # Old enough to be separate
                 self.recent_transcripts[source] = (text, current_time)
-                return True, text
+                return True, text, is_partial
             
             # Check for duplicate/substring
             if self._is_substring_or_similar(prev_text, text):
                 # Skip if current is contained in previous
                 if text.lower().strip() in prev_text.lower():
-                    return False, None
+                    return False, None, is_partial
                 # Update if current contains previous (it's longer)
                 elif prev_text.lower().strip() in text.lower():
                     self.recent_transcripts[source] = (text, current_time)
-                    return True, text
+                    return True, text, is_partial
                 else:
                     # Very similar, skip
-                    return False, None
+                    return False, None, is_partial
             
             # Check for continuation (overlapping words)
             overlap_length = self._get_overlap_length(prev_text, text)
@@ -92,19 +103,19 @@ class TranscriptionDeduplicator:
                     # Merge: previous + new unique part
                     merged_text = prev_text + " " + unique_part
                     self.recent_transcripts[source] = (merged_text, current_time)
-                    return True, merged_text
+                    return True, merged_text, is_partial
                 else:
                     # No new content, skip
-                    return False, None
+                    return False, None, is_partial
             
             # Not a continuation or duplicate, treat as new
             self.recent_transcripts[source] = (text, current_time)
-            return True, text
+            return True, text, is_partial
         
         else:
             # First time seeing this source
             self.recent_transcripts[source] = (text, current_time)
-            return True, text
+            return True, text, is_partial
 
 def transcription_process_target(result_queue, stop_event):
     """
@@ -128,14 +139,14 @@ def transcription_process_target(result_queue, stop_event):
         time.sleep(1) # Small stagger to prevent CPU spike
         mic_thread.start()
         
-        print("✅ [SENSES] Local Ears Open (Parakeet/Whisper Running)")
+        print("✅ [SENSES] Local Ears Open (Parakeet Streaming Running)")
 
         while not stop_event.is_set():
             # 1. Check Microphone
             try:
                 if not mic_transcriber.result_queue.empty():
                     text, filename, source, conf = mic_transcriber.result_queue.get_nowait()
-                    should_output, final_text = deduplicator.process(text, "microphone")
+                    should_output, final_text, is_partial = deduplicator.process(text, "microphone")
                     
                     if should_output:
                         payload = {
@@ -143,7 +154,8 @@ def transcription_process_target(result_queue, stop_event):
                             "source": "microphone",
                             "text": final_text,
                             "confidence": conf,
-                            "timestamp": time.time()
+                            "timestamp": time.time(),
+                            "is_partial": is_partial
                         }
                         result_queue.put(payload)
                     mic_transcriber.result_queue.task_done()
@@ -155,18 +167,27 @@ def transcription_process_target(result_queue, stop_event):
             # 2. Check Desktop
             try:
                 if not desktop_transcriber.result_queue.empty():
-                    text, filename, audio_type, conf = desktop_transcriber.result_queue.get_nowait()
-                    should_output, final_text = deduplicator.process(text, "desktop")
+                    # The Parakeet Desktop Transcriber sends: (text, None, source, conf)
+                    # source can be "desktop" or "desktop_partial"
+                    text, filename, source, conf = desktop_transcriber.result_queue.get_nowait()
+                    should_output, final_text, is_partial = deduplicator.process(text, source)
                     
                     if should_output:
                         payload = {
                             "type": "transcript",
                             "source": "desktop",
-                            "audio_type": audio_type, # speech or music
+                            "audio_type": "speech", 
                             "text": final_text,
                             "confidence": conf,
-                            "timestamp": time.time()
+                            "timestamp": time.time(),
+                            "is_partial": is_partial
                         }
+                        
+                        # Adjust payload for live/partial events
+                        if is_partial:
+                            payload["type"] = "partial_transcript"
+                            payload["source"] = "desktop_live"
+                            
                         result_queue.put(payload)
                     desktop_transcriber.result_queue.task_done()
             except Empty:
@@ -174,7 +195,7 @@ def transcription_process_target(result_queue, stop_event):
             except Exception as e:
                 print(f"Desktop Queue Error: {e}")
 
-            time.sleep(0.05) # Prevent CPU spinning
+            time.sleep(0.02) # Faster loop for responsiveness
 
     except Exception as e:
         print(f"❌ [SENSES] Critical Transcription Failure: {e}")

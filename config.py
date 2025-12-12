@@ -8,7 +8,7 @@ DEBUG_MODE = False
 
 # --- Audio Configuration ---
 # Use the same ID as your audio_mon app (likely 4 or 5 based on your files)
-DESKTOP_AUDIO_DEVICE_ID = 4  
+DESKTOP_AUDIO_DEVICE_ID = 2
 AUDIO_SAMPLE_RATE = 16000
 
 
