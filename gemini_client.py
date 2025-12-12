@@ -1,12 +1,13 @@
 # gemini_client.py
 import asyncio
 import json
-import requests # type: ignore
-import websockets # type: ignore
+import requests
+import websockets
 import time
+import base64
 
 class GeminiClient:
-    def __init__(self, api_key, prompt, safety_settings=None, response_callback=None, error_callback=None, max_output_tokens=150, debug_mode=False):
+    def __init__(self, api_key, prompt, safety_settings=None, response_callback=None, error_callback=None, max_output_tokens=150, debug_mode=False, audio_sample_rate=16000):
         self.api_key = api_key
         self.prompt = prompt
         self.safety_settings = safety_settings
@@ -14,12 +15,12 @@ class GeminiClient:
         self.error_callback = error_callback
         self.max_output_tokens = max_output_tokens
         self.debug_mode = debug_mode
+        self.audio_sample_rate = audio_sample_rate
+        
         self.websocket = None
         self.is_connected = False
         self.connection_lock = asyncio.Lock() if hasattr(asyncio, 'Lock') else None
-        self.last_send_time = 0
-        self.min_send_interval = 0.1
-
+        
     def debug_print(self, message):
         if self.debug_mode:
             print(f"[DEBUG] {message}")
@@ -36,105 +37,176 @@ class GeminiClient:
             if response.status_code == 200:
                 return True, "API connection successful! Gemini 2.0 Flash is ready."
             elif response.status_code == 404:
-                url_fallback = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.api_key}"
-                response_fallback = requests.post(url_fallback, json={
-                    "contents": [{"parts": [{"text": "Hello, this is a connection test."}]}]
-                }, timeout=10)
-                if response_fallback.status_code == 200:
-                    return True, "API key works but Gemini 2.0 Flash may not be available. Live streaming might not work."
-                else:
-                    return False, f"API key invalid or no access to Gemini models: {response_fallback.status_code}"
+                return False, f"Gemini 2.0 Flash model not found. Check if the API key has access to 'gemini-2.0-flash-exp'."
             else:
                 return False, f"API test failed: {response.status_code} - {response.text}"
         except Exception as e:
             return False, f"Connection test failed: {e}"
 
     async def connect(self):
+        """
+        Main connect method with Auto-Retry / Fallback logic.
+        """
         if self.connection_lock:
             async with self.connection_lock:
-                return await self._do_connect()
+                return await self._connect_with_fallback()
         else:
-            return await self._do_connect()
+            return await self._connect_with_fallback()
 
-    async def _do_connect(self):
+    async def _connect_with_fallback(self):
+        self.info_print("Attempt 1: Connecting with System Prompt in Setup...")
+        success = await self._do_connect_attempt(use_system_instruction=True)
+        
+        if success:
+            return True
+            
+        self.info_print("⚠️ Attempt 1 failed. Retrying with Fallback Strategy...")
+        await asyncio.sleep(1)
+        
+        self.info_print("Attempt 2: Connecting with Bare Setup...")
+        success = await self._do_connect_attempt(use_system_instruction=False)
+        
+        if success:
+            self.info_print("✅ Fallback connection successful! Sending Prompt manually...")
+            await self._send_initial_prompt_message()
+            return True
+            
+        self.info_print("❌ All connection attempts failed.")
+        return False
+
+    async def _do_connect_attempt(self, use_system_instruction=True):
         await self._cleanup_connection()
         try:
-            self.info_print("Connecting to Gemini WebSocket...")
-            uri = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key={self.api_key}"
+            # Use v1beta (Correct for Gemini 2.0)
+            uri = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={self.api_key}"
+            
             self.websocket = await asyncio.wait_for(
                 websockets.connect(uri, ping_interval=20, ping_timeout=10),
                 timeout=15.0
             )
-            self.debug_print("WebSocket connected successfully")
-            setup_message = {
+            
+            # Setup Message (camelCase for v1beta)
+            setup_payload = {
                 "setup": {
                     "model": "models/gemini-2.0-flash-exp",
-                    "generation_config": {
-                        "response_modalities": ["TEXT"]
+                    "generationConfig": {
+                        "responseModalities": ["TEXT"],
+                        "maxOutputTokens": self.max_output_tokens
                     }
                 }
             }
-            if self.max_output_tokens and 50 <= self.max_output_tokens <= 8192:
-                setup_message["setup"]["generation_config"]["max_output_tokens"] = self.max_output_tokens
-            if self.safety_settings:
-                setup_message["setup"]["safety_settings"] = self.safety_settings
-            await asyncio.wait_for(
-                self.websocket.send(json.dumps(setup_message)),
-                timeout=10.0
-            )
+            
+            if use_system_instruction:
+                setup_payload["setup"]["systemInstruction"] = {
+                    "parts": [{"text": self.prompt}]
+                }
+            
+            await self.websocket.send(json.dumps(setup_payload))
+            
             response = await asyncio.wait_for(
                 self.websocket.recv(),
                 timeout=15.0
             )
             setup_response = json.loads(response)
+            
             if "setupComplete" in setup_response:
+                self.info_print("Gemini Setup Complete.")
                 self.is_connected = True
-                self.info_print("Gemini connection established successfully")
                 return True
             else:
-                self.info_print(f"Setup failed: {setup_response}")
-                if self.error_callback:
-                    self.error_callback(f"Gemini setup failed: {setup_response}")
-                await self._cleanup_connection()
+                self.debug_print(f"Setup response invalid: {setup_response}")
                 return False
+                
+        except websockets.exceptions.ConnectionClosed as e:
+            self.debug_print(f"Connection closed during setup: Code {e.code} ({e.reason})")
+            return False
         except Exception as e:
-            self.info_print(f"Error connecting to Gemini: {e}")
-            if self.error_callback:
-                self.error_callback(f"Connection error: {e}")
-            await self._cleanup_connection()
+            self.debug_print(f"Connection exception: {e}")
             return False
 
-    async def send_image(self, base64_image):
-        if not self.is_healthy():
-            self.debug_print("Cannot send image: WebSocket not connected or healthy")
-            return False
-
-        current_time = time.time()
-        time_since_last_send = current_time - self.last_send_time
-        if time_since_last_send < self.min_send_interval:
-            await asyncio.sleep(self.min_send_interval - time_since_last_send)
-
+    async def _send_initial_prompt_message(self):
+        if not self.is_connected: return
         try:
-            message = {
-                "client_content": {
+            msg = {
+                "clientContent": {
                     "turns": [{
                         "role": "user",
-                        "parts": [
-                            {"text": self.prompt},
-                            {"inline_data": {"mime_type": "image/jpeg", "data": base64_image}}
-                        ]
+                        "parts": [{"text": f"SYSTEM INSTRUCTIONS: {self.prompt}"}]
                     }],
-                    "turn_complete": True
+                    "turnComplete": False
                 }
             }
-            await asyncio.wait_for(
-                self.websocket.send(json.dumps(message)),
-                timeout=10.0
-            )
-            self.last_send_time = time.time()
-            return True
+            await self.websocket.send(json.dumps(msg))
         except Exception as e:
-            self.info_print(f"Error sending image: {e}")
+            self.debug_print(f"Failed to send initial prompt: {e}")
+
+    async def send_multimodal_frame(self, base64_image, audio_bytes=None, turn_complete=False, text=None):
+        """
+        Hybrid Approach:
+        - Audio -> realtimeInput (required for streaming)
+        - Video -> clientContent (inline_data) (mimics old working code)
+        - Text -> clientContent
+        """
+        if not self.is_connected or not self.websocket:
+            return False
+
+        try:
+            # 1. Send Audio via realtimeInput (Streaming)
+            if audio_bytes:
+                base64_audio = base64.b64encode(audio_bytes).decode('utf-8')
+                audio_msg = {
+                    "realtimeInput": {
+                        "mediaChunks": [{
+                            "mimeType": f"audio/pcm;rate={self.audio_sample_rate}",
+                            "data": base64_audio
+                        }]
+                    }
+                }
+                await self.websocket.send(json.dumps(audio_msg))
+
+            # 2. Construct Client Content (Video + Text + Trigger)
+            # We bundle these into a single 'clientContent' message to emulate a "Turn"
+            parts = []
+            
+            if text:
+                parts.append({"text": text})
+
+            # Send Image as Inline Data (The "Old Way" that worked)
+            if base64_image:
+                parts.append({
+                    "inlineData": {
+                        "mimeType": "image/jpeg",
+                        "data": base64_image
+                    }
+                })
+
+            # If we have content to send as a Turn
+            if parts:
+                msg = {
+                    "clientContent": {
+                        "turns": [{
+                            "role": "user",
+                            "parts": parts
+                        }],
+                        "turnComplete": turn_complete 
+                    }
+                }
+                await self.websocket.send(json.dumps(msg))
+            
+            # If we strictly have NO parts but need to trigger a turn complete (e.g. audio only trigger)
+            elif turn_complete:
+                 await self.websocket.send(json.dumps({
+                    "clientContent": { "turnComplete": True }
+                }))
+            
+            return True
+            
+        except websockets.exceptions.ConnectionClosed:
+            self.info_print("Socket closed during send.")
+            self.is_connected = False
+            return False
+        except Exception as e:
+            self.debug_print(f"Error sending frame: {e}")
             self.is_connected = False
             return False
 
@@ -144,26 +216,27 @@ class GeminiClient:
                 try:
                     response = await asyncio.wait_for(self.websocket.recv(), timeout=30.0)
                     data = json.loads(response)
+                    
                     if "serverContent" in data:
                         content = data["serverContent"]
+                        
                         if "modelTurn" in content:
                             parts = content["modelTurn"].get("parts", [])
                             for part in parts:
                                 if "text" in part and self.response_callback:
-                                    self.response_callback(part["text"])
+                                    text = part["text"]
+                                    if "[WAIT]" not in text:
+                                        self.response_callback(text)
+                                        
                 except asyncio.TimeoutError:
-                    self.debug_print("Response timeout - connection may be stale")
-                    self.is_connected = False
-                    break
-                except websockets.exceptions.ConnectionClosed:
-                    self.info_print("WebSocket connection closed")
+                    continue
+                except websockets.exceptions.ConnectionClosed as e:
+                    self.info_print(f"WebSocket listener closed: {e.code} - {e.reason}")
                     self.is_connected = False
                     break
                 except Exception as e:
                     if self.is_connected:
                         self.info_print(f"Error in response listener: {e}")
-                        if self.error_callback:
-                            self.error_callback(f"Listener error: {e}")
                     break
         finally:
             self.is_connected = False
@@ -179,17 +252,15 @@ class GeminiClient:
                 if not self.websocket.closed:
                     await asyncio.wait_for(self.websocket.close(), timeout=5.0)
             except AttributeError:
-                self.debug_print("WebSocket object has no 'closed' attribute. It may be a different object type or an error state.")
-            except Exception as e:
-                self.debug_print(f"Error closing websocket: {e}")
+                pass
+            except Exception:
+                pass
         self.websocket = None
 
     def is_healthy(self):
-        """More robustly checks if the connection is active."""
         if not self.is_connected or not self.websocket:
             return False
         try:
             return not self.websocket.closed
         except AttributeError:
-            # If the object doesn't have a '.closed' attribute, assume it's unhealthy.
             return False

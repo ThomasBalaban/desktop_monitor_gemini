@@ -1,6 +1,7 @@
 import tkinter as tk
 from datetime import datetime
 import threading
+import time
 
 from config_loader import ConfigLoader
 from gemini_client import GeminiClient
@@ -9,40 +10,111 @@ from streaming_manager import StreamingManager
 from app_gui import AppGUI
 from websocket_server import WebSocketServer, WEBSOCKET_PORT
 
+# Import the new service
+from transcriber_core.transcription_service import TranscriptionService
+
 class AppController:
     def __init__(self):
         self.config = ConfigLoader()
         print("Gemini Screen Watcher - Starting up...")
-        self.screen_capture = ScreenCapture(self.config.image_quality)
-        self.gemini_client = GeminiClient(
-            self.config.api_key, self.config.prompt, self.config.safety_settings,
-            self._on_gemini_response, self._on_gemini_error, self.config.max_output_tokens, self.config.debug_mode
+        
+        # 1. Initialize Transcription Service
+        self.transcription_service = TranscriptionService()
+        
+        # --- PASS VIDEO INDEX HERE ---
+        self.screen_capture = ScreenCapture(
+            self.config.image_quality, 
+            video_index=self.config.video_device_index
         )
+        
+        self.gemini_client = GeminiClient(
+            self.config.api_key, 
+            self.config.prompt, 
+            self.config.safety_settings,
+            self._on_gemini_response, 
+            self._on_gemini_error, 
+            self.config.max_output_tokens, 
+            self.config.debug_mode,
+            audio_sample_rate=self.config.audio_sample_rate
+        )
+
         self.streaming_manager = StreamingManager(
             self.screen_capture, self.gemini_client, self.config.fps,
-            restart_interval=30, debug_mode=self.config.debug_mode
+            restart_interval=1500, debug_mode=self.config.debug_mode
         )
         self.streaming_manager.set_restart_callback(self.on_stream_restart)
         self.streaming_manager.set_error_callback(self._on_streaming_error)
+        self.streaming_manager.set_preview_callback(self.gui_update_wrapper)
+        
         self.websocket_server = WebSocketServer()
         self.current_response_buffer = ""
         self.gui = AppGUI(self)
-        self._initialize_capture_region()
+        
+        # Only init region if we are NOT using a camera
+        if self.config.video_device_index is None:
+            self._initialize_capture_region()
+            
         self.gui.root.after(2000, self._start_stream_on_init)
+        
+        # Start Poll Loop for Transcripts
+        self.gui.root.after(1000, self._poll_transcripts)
+
+    def gui_update_wrapper(self, frame):
+        # We need this because streaming_manager runs in a thread
+        if self.gui:
+            self.gui.update_preview(frame)
 
     def run(self):
+        # Start Senses
+        print("Starting Transcription Service...")
+        self.transcription_service.start()
+        
         if not self.config.is_api_key_configured():
-            self.gui.update_status("ERROR: API_KEY not configured in config.py", "red")
-            print("ERROR: API_KEY is not configured in config.py. Please set it and restart.")
-            self.gui.add_error("API_KEY not configured in config.py.")
+            self.gui.update_status("ERROR: API_KEY not configured", "red")
+            self.gui.add_error("API_KEY not configured.")
         
         self.websocket_server.start()
-        self.gui.run()
+        
+        try:
+            self.gui.run()
+        finally:
+            # Cleanup on exit
+            print("Shutting down services...")
+            self.transcription_service.stop()
+            self.streaming_manager.stop_streaming()
+
+    def _poll_transcripts(self):
+        """Check for new local transcripts and handle them."""
+        results = self.transcription_service.get_results()
+        
+        for res in results:
+            # 1. Broadcast to Brain (via WebSocket)
+            self.websocket_server.broadcast(res)
+            
+            # 2. Update Console log
+            source_icon = "🎤" if res['source'] == "microphone" else "🖥️"
+            if self.config.debug_mode:
+                print(f"{source_icon} [{res['source'].upper()}] {res['text']}")
+            
+            # 3. Feed to Gemini (Context Injection)
+            # We want Gemini to know what was said locally
+            self.streaming_manager.inject_transcript(res['text'], res['source'])
+
+        # Run again in 100ms
+        self.gui.root.after(100, self._poll_transcripts)
+
+    def request_analysis(self):
+        print("Manual analysis triggered.")
+        self.gui.update_status("Requesting Analysis...", "cyan")
+        self.streaming_manager.trigger_manual_analysis(
+            "Analyze the audio and video from the last 5 seconds. Describe exactly what happened."
+        )
 
     def _start_stream_on_init(self):
-        """Starts the streaming process automatically after GUI initialization."""
-        if not self.screen_capture.capture_region:
-            self.gui.update_status("Cannot start. No screen region is configured.", "red")
+        # Check readiness instead of just region
+        if not self.screen_capture.is_ready():
+            self.gui.update_status("Cannot start. No source configured.", "red")
+            print("ERROR: No Camera Index AND No Screen Region set.")
             return
         
         def run_check_and_start():
@@ -54,17 +126,15 @@ class AppController:
         threading.Thread(target=run_check_and_start, daemon=True).start()
 
     def _finalize_start(self, api_ok, message):
-        """Finalizes the start process based on API check result."""
         if not api_ok:
             self.gui.add_error(f"API Connection Check Failed: {message}")
             self.gui.update_status("API Check Failed", "red")
-            print("API Check Failed. Streaming will not start.")
             return
 
-        print("API connection successful. Starting the screen streaming process...")
+        print("API connection successful. Starting streaming...")
+        self.streaming_manager.set_status_callback(self.gui.update_status)
         self.streaming_manager.start_streaming()
         self.gui.update_status("Connecting...", "orange")
-        self.streaming_manager.set_status_callback(self.gui.update_status)
 
     def update_websocket_gui_status(self):
         self.gui.update_websocket_status(f"Running at ws://localhost:{WEBSOCKET_PORT}", "#4CAF50")
@@ -77,14 +147,11 @@ class AppController:
             self.screen_capture.set_capture_region(self.config.capture_region)
             print(f"Using capture region from config: {self.config.get_region_description()}")
         else:
-            error_msg = "No capture region set in config.py"
-            self.gui.update_status(error_msg, "red")
-            print(f"ERROR: {error_msg}")
-            self.gui.add_error(error_msg)
+            print("No capture region set (will rely on GUI if not using camera)")
 
     def _on_gemini_response(self, text_chunk):
         self.current_response_buffer += text_chunk
-        if self.current_response_buffer.strip().endswith(('.', '!', '?')):
+        if self.current_response_buffer.strip().endswith(('.', '!', '?', '\n')):
             final_text = self.current_response_buffer.strip()
             self.gui.add_response(final_text)
             response_data = {
@@ -96,11 +163,9 @@ class AppController:
             self.current_response_buffer = ""
 
     def _on_gemini_error(self, error_message):
-        """Callback for errors from GeminiClient."""
         self.gui.add_error(f"Gemini API Error: {error_message}")
 
     def _on_streaming_error(self, error_message):
-        """Callback for errors from StreamingManager."""
         self.gui.add_error(f"Streaming Error: {error_message}")
 
     def get_prompt(self):
