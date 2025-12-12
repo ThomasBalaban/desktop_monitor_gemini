@@ -46,6 +46,7 @@ OUTPUT FORMATTING RULES:
 1. You must output your response STRICTLY using the XML tags defined below. 
 2. Do not output any plain text or conversational filler outside of these tags.
 3. Be descriptive, not concise.
+4. do not provide audio context
 
 USE THE FOLLOWING TAGS FOR YOUR RESPONSE:
 
@@ -70,12 +71,6 @@ Provide a clear, one-sentence statement of what is on screen (e.g., "A video gam
 - Transcribe any text visible on screen (subtitles, menu options, HUDs).
 - Mention health bars, maps, or UI elements if present.
 </text_and_ui>
-
-<audio_context>
-- Listen to the provided audio stream.
-- Do NOT transcribe speech or dialogue (this is handled by a separate system).
-- ONLY describe background music, sound effects, or significant audio events (e.g., "Explosions," "Upbeat electronic music," "Silence," "Heavy breathing").
-</audio_context>
 
 <actionable_events>
 - Describe the current state of play or video progression.
