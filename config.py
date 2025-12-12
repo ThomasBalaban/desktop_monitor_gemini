@@ -73,8 +73,8 @@ Provide a clear, one-sentence statement of what is on screen (e.g., "A video gam
 
 <audio_context>
 - Listen to the provided audio stream.
-- Transcribe speech exactly.
-- Describe background music or sound effects (e.g., "Explosions," "Upbeat music," "Silence").
+- Do NOT transcribe speech or dialogue (this is handled by a separate system).
+- ONLY describe background music, sound effects, or significant audio events (e.g., "Explosions," "Upbeat electronic music," "Silence," "Heavy breathing").
 </audio_context>
 
 <actionable_events>

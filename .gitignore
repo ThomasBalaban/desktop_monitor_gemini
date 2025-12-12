@@ -4,3 +4,4 @@ api_keys.py
 /dist/**
 .DS_Store
 /audio_captures/**
+transcriber_core/__pycache__/**
