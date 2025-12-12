@@ -4,7 +4,7 @@ import threading
 import websockets
 import time
 
-WEBSOCKET_PORT = 8001
+WEBSOCKET_PORT = 8003
 
 class WebSocketServer:
     """Manages a WebSocket server to broadcast data to clients."""

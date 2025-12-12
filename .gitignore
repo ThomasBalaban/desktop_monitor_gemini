@@ -3,3 +3,4 @@ api_keys.py
 /build/**
 /dist/**
 .DS_Store
+/audio_captures/**
