@@ -242,12 +242,18 @@ class StreamingManager:
                         if self.debug_mode: print("Trigger: Heartbeat Pulse")
 
                 # 4. Send Data using the Hybrid Method
-                await self.gemini_client.send_multimodal_frame(
+                # FIX: Check if send was successful. If not, break the loop.
+                send_success = await self.gemini_client.send_multimodal_frame(
                     base64_image, 
                     audio_bytes, 
                     turn_complete, 
                     text=final_text_payload
                 )
+
+                if not send_success:
+                    self.info_print("Failed to send frame (connection lost). Ending session.")
+                    self.state = StreamingState.ERROR
+                    break
                 
                 # 5. Session Time Limit Check
                 if self.session_start_time and (time.time() - self.session_start_time) >= self.restart_interval:

@@ -142,16 +142,16 @@ class GeminiClient:
 
     async def send_multimodal_frame(self, base64_image, audio_bytes=None, turn_complete=False, text=None):
         """
-        Hybrid Approach:
-        - Audio -> realtimeInput (required for streaming)
-        - Video -> clientContent (inline_data) (mimics old working code)
-        - Text -> clientContent
+        Hybrid Approach (Fixed for 1007 Error):
+        - Audio -> realtimeInput (Streaming Context)
+        - Video -> clientContent (Inline Data)
+        - Text -> clientContent (User Prompt)
         """
         if not self.is_connected or not self.websocket:
             return False
 
         try:
-            # 1. Send Audio via realtimeInput (Streaming)
+            # 1. AUDIO: Send via realtimeInput (Efficient Streaming)
             if audio_bytes:
                 base64_audio = base64.b64encode(audio_bytes).decode('utf-8')
                 audio_msg = {
@@ -164,14 +164,13 @@ class GeminiClient:
                 }
                 await self.websocket.send(json.dumps(audio_msg))
 
-            # 2. Construct Client Content (Video + Text + Trigger)
-            # We bundle these into a single 'clientContent' message to emulate a "Turn"
+            # 2. VIDEO & TEXT: Send via clientContent
+            # We must send video here because realtimeInput rejects JPEGs (Error 1007)
             parts = []
             
             if text:
                 parts.append({"text": text})
 
-            # Send Image as Inline Data (The "Old Way" that worked)
             if base64_image:
                 parts.append({
                     "inlineData": {
@@ -180,8 +179,8 @@ class GeminiClient:
                     }
                 })
 
-            # If we have content to send as a Turn
-            if parts:
+            # Send if we have content OR if we need to force a turn complete
+            if parts or turn_complete:
                 msg = {
                     "clientContent": {
                         "turns": [{
@@ -193,12 +192,6 @@ class GeminiClient:
                 }
                 await self.websocket.send(json.dumps(msg))
             
-            # If we strictly have NO parts but need to trigger a turn complete (e.g. audio only trigger)
-            elif turn_complete:
-                 await self.websocket.send(json.dumps({
-                    "clientContent": { "turnComplete": True }
-                }))
-            
             return True
             
         except websockets.exceptions.ConnectionClosed:
@@ -209,6 +202,7 @@ class GeminiClient:
             self.debug_print(f"Error sending frame: {e}")
             self.is_connected = False
             return False
+
 
     async def listen_for_responses(self):
         try:
