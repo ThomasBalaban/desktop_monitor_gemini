@@ -11,6 +11,7 @@ DEBUG_MODE = False
 DESKTOP_AUDIO_DEVICE_ID = 4  
 AUDIO_SAMPLE_RATE = 16000
 
+
 # --- Vision Configuration ---
 # Set to None to use GUI selection, or specify coordinates:
 CAPTURE_REGION = {
@@ -62,3 +63,21 @@ GUIDELINES:
 # PROMPT = """Screen content analysis: Describe in 1-2 paragraphs what you observe. Include content type, people (appearance, attire, positioning), visual elements, and composition. Use direct, casual descriptive language.
 
 # For reference: Describe poses and positioning factually - if someone is leaning forward, positioned to show certain areas, or framed in particular ways, state this directly. Avoid vague terms like "casual pose" when the positioning appears intentional. Be specific about clothing details and fit. If content appears designed to be sexy or attractive, state this clearly along with what makes it so. Only mention attractiveness/sexiness when it's clearly present - don't comment on its absence. Use straightforward, conversational terms rather than clinical language."""
+
+
+## SETTINGS FROM OLD APP
+# Audio Settings
+FS = 16000  # Sample rate in Hz
+CHUNK_DURATION = 5  # Duration of each audio chunk in seconds
+OVERLAP = 1.5  # Overlap between chunks in seconds
+MAX_THREADS = 4  # Maximum number of threads for transcription
+SAVE_DIR = "audio_captures"  # Directory for saving audio files
+DESKTOP_DEVICE_ID = 4
+
+# Microphone Settings
+MICROPHONE_DEVICE_ID = 5  # Your Scarlett Solo 4th Gen
+
+# Whisper Model Settings
+MODEL_SIZE = "base.en"  # The whisper model to use
+DEVICE = "cpu"  # The device to run the model on
+COMPUTE_TYPE = "int8"  # Compute type for the model

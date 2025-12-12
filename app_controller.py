@@ -1,6 +1,7 @@
 import tkinter as tk
 from datetime import datetime
 import threading
+import time
 
 from config_loader import ConfigLoader
 from gemini_client import GeminiClient
@@ -9,10 +10,16 @@ from streaming_manager import StreamingManager
 from app_gui import AppGUI
 from websocket_server import WebSocketServer, WEBSOCKET_PORT
 
+# Import the new service
+from transcriber_core.transcription_service import TranscriptionService
+
 class AppController:
     def __init__(self):
         self.config = ConfigLoader()
         print("Gemini Screen Watcher - Starting up...")
+        
+        # 1. Initialize Transcription Service
+        self.transcription_service = TranscriptionService()
         
         # --- PASS VIDEO INDEX HERE ---
         self.screen_capture = ScreenCapture(
@@ -37,26 +44,64 @@ class AppController:
         )
         self.streaming_manager.set_restart_callback(self.on_stream_restart)
         self.streaming_manager.set_error_callback(self._on_streaming_error)
+        self.streaming_manager.set_preview_callback(self.gui_update_wrapper)
         
         self.websocket_server = WebSocketServer()
         self.current_response_buffer = ""
         self.gui = AppGUI(self)
-        
-        self.streaming_manager.set_preview_callback(self.gui.update_preview)
         
         # Only init region if we are NOT using a camera
         if self.config.video_device_index is None:
             self._initialize_capture_region()
             
         self.gui.root.after(2000, self._start_stream_on_init)
+        
+        # Start Poll Loop for Transcripts
+        self.gui.root.after(1000, self._poll_transcripts)
+
+    def gui_update_wrapper(self, frame):
+        # We need this because streaming_manager runs in a thread
+        if self.gui:
+            self.gui.update_preview(frame)
 
     def run(self):
+        # Start Senses
+        print("Starting Transcription Service...")
+        self.transcription_service.start()
+        
         if not self.config.is_api_key_configured():
             self.gui.update_status("ERROR: API_KEY not configured", "red")
             self.gui.add_error("API_KEY not configured.")
         
         self.websocket_server.start()
-        self.gui.run()
+        
+        try:
+            self.gui.run()
+        finally:
+            # Cleanup on exit
+            print("Shutting down services...")
+            self.transcription_service.stop()
+            self.streaming_manager.stop_streaming()
+
+    def _poll_transcripts(self):
+        """Check for new local transcripts and handle them."""
+        results = self.transcription_service.get_results()
+        
+        for res in results:
+            # 1. Broadcast to Brain (via WebSocket)
+            self.websocket_server.broadcast(res)
+            
+            # 2. Update Console log
+            source_icon = "🎤" if res['source'] == "microphone" else "🖥️"
+            if self.config.debug_mode:
+                print(f"{source_icon} [{res['source'].upper()}] {res['text']}")
+            
+            # 3. Feed to Gemini (Context Injection)
+            # We want Gemini to know what was said locally
+            self.streaming_manager.inject_transcript(res['text'], res['source'])
+
+        # Run again in 100ms
+        self.gui.root.after(100, self._poll_transcripts)
 
     def request_analysis(self):
         print("Manual analysis triggered.")

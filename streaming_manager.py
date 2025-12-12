@@ -33,9 +33,13 @@ class StreamingManager:
         self.pulse_interval = 10.0 # Only speak every 10s if nothing is happening
         self.silence_threshold = 0.01
 
-        # Manual Trigger Logic (Restored)
+        # Manual Trigger Logic
         self.manual_trigger_text = None
         self.trigger_lock = threading.Lock()
+        
+        # Transcript Injection (New)
+        self.transcript_buffer = []
+        self.buffer_lock = threading.Lock()
         
         # Tasks
         self.streaming_task = None
@@ -65,6 +69,12 @@ class StreamingManager:
         with self.trigger_lock:
             self.manual_trigger_text = text
         self.info_print(f"Manual analysis queued: {text}")
+
+    def inject_transcript(self, text, source):
+        """Called by AppController when local STT hears something."""
+        with self.buffer_lock:
+            # Format: "[Microphone]: Hello Nami"
+            self.transcript_buffer.append(f"[{source.capitalize()}]: {text}")
 
     def start_streaming(self):
         if self.state != StreamingState.STOPPED:
@@ -194,26 +204,50 @@ class StreamingManager:
                         self.manual_trigger_text = None # consume it
                         self.last_pulse_time = time.time() # Reset timer
                 
-                # If no manual trigger, check auto-triggers
+                # --- NEW: Check for Local Transcripts ---
+                injected_text = None
+                with self.buffer_lock:
+                    if self.transcript_buffer:
+                        # Combine all recent utterances into one context block
+                        combined_speech = " ".join(self.transcript_buffer)
+                        injected_text = f"CONTEXT UPDATE (What you just heard locally):\n{combined_speech}"
+                        self.transcript_buffer.clear() # Clear after reading
+                        
+                        # If we have speech, we force a turn complete so Gemini answers immediately
+                        turn_complete = True 
+                        self.last_pulse_time = time.time()
+                        if self.debug_mode: print(f"Trigger: Local Speech - {combined_speech}")
+
+                # Combine Manual and Injected text if both exist
+                final_text_payload = manual_text 
+                if injected_text:
+                    if final_text_payload:
+                        final_text_payload += f"\n\n{injected_text}"
+                    else:
+                        final_text_payload = injected_text
+
+                # Check Audio/Heartbeat triggers (only if no explicit text trigger)
                 if not turn_complete:
                     current_time = time.time()
                     time_since_pulse = current_time - self.last_pulse_time
 
                     if is_loud:
-                        # Sound detected -> Trigger check immediately
                         turn_complete = True
                         self.last_pulse_time = current_time
                         if self.debug_mode: print("Trigger: Audio Detected")
                         
                     elif time_since_pulse > self.pulse_interval:
-                        # Timer expired -> Trigger periodic check
                         turn_complete = True
                         self.last_pulse_time = current_time
                         if self.debug_mode: print("Trigger: Heartbeat Pulse")
 
                 # 4. Send Data using the Hybrid Method
-                # Pass the manual_text if it exists
-                await self.gemini_client.send_multimodal_frame(base64_image, audio_bytes, turn_complete, text=manual_text)
+                await self.gemini_client.send_multimodal_frame(
+                    base64_image, 
+                    audio_bytes, 
+                    turn_complete, 
+                    text=final_text_payload
+                )
                 
                 # 5. Session Time Limit Check
                 if self.session_start_time and (time.time() - self.session_start_time) >= self.restart_interval:
