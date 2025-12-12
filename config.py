@@ -39,25 +39,38 @@ SAFETY_SETTINGS = [
 # Optimized for concise details, dialogue transcription, and specific visuals.
 # --- SYSTEM PROMPT ---
 PROMPT = """
-ROLE: Real-time Multimodal Observer.
-INPUT: You are watching a screen and listening to audio (speech, music, AND sound effects).
+Analyze this screen capture and provide a comprehensive description in the form of one or two paragraphs. 
+Include all relevant visual information without censorship or omission.
 
-INSTRUCTIONS:
-Provide a concise, structured update of what just happened.
+Start with a clear statement of what is on screen (e.g., "A video game character standing in a forest," "A YouTube video about cooking").
 
-1. [AUDIO]: LISTEN CAREFULLY.
-   - If there is speech: Transcribe it exactly.
-   - If there is music: Describe the genre/mood (e.g., "Upbeat electronic music").
-   - If there are sound effects: Describe them (e.g., "Loud explosions," "Menu clicking sounds," "Wind blowing").
-   - ONLY report [SILENCE] if the audio level is absolute zero.
+DETAILED ANALYSIS REQUIREMENTS:
 
-2. [VISUAL]: Briefly describe characters, key actions, and the setting.
+1. SCENE & ENTITIES (The "Visuals"):
+   - Describe specific objects, characters, and background elements. 
+   - NAME the things you see (e.g., instead of "an object," say "a red barrel," "a floating robot," "a large sword").
+   - Describe colors and lighting (e.g., "ominous red lighting," "bright sunny field").
 
-3. [ACTION]: Summarize the main event happening right now.
+2. CHARACTERS & APPEAL (Crucial for Reactions):
+   - Provide detailed appearance descriptions: physical build, clothing details and fit (or lack thereof), hair, and distinctive features.
+   - Describe poses and positioning factually. If someone is leaning forward, positioned to show certain areas, or framed in particular ways, state this directly.
+   - Avoid vague terms like "casual pose" when the positioning appears intentional. 
+   - If content appears designed to be sexy or attractive, state this clearly along with what makes it so. Use straightforward, conversational terms rather than clinical language.
+   - Only mention attractiveness/sexiness when it's clearly present.
 
-GUIDELINES:
-- Do not ignore "non-speech" audio. Sound effects are important context.
-- Keep descriptions punchy and direct.
+3. TEXT & UI:
+   - READ any text on screen (Game Over screens, subtitles, menu options).
+   - Mention health bars, maps, or UI elements if present.
+
+4. AUDIO CONTEXT (If you hear sound):
+   - Transcribe speech exactly.
+   - Describe background music or sound effects (e.g., "Explosions," "Upbeat music").
+
+5. ACTIONABLE EVENTS:
+   - Is something dying? Is the player winning? Is there a "Game Over" screen?
+   - Is there a sudden change in the scene?
+
+Goal: Provide enough detail that a blind person could visualize the scene perfectly. Do not be concise. Be descriptive.
 """
 
 # PROMPT = """Screen content analysis: Describe in 1-2 paragraphs what you observe. Include content type, people (appearance, attire, positioning), visual elements, and composition. Use direct, casual descriptive language.

@@ -1,7 +1,7 @@
 import asyncio
 import json
 import threading
-import websockets
+import websockets # type: ignore
 import time
 
 WEBSOCKET_PORT = 8003
@@ -131,8 +131,20 @@ class WebSocketServer:
 
     def broadcast(self, data):
         """Thread-safely broadcasts data to all connected clients."""
+        # 1. Create the coroutine object
+        coro = self._broadcast_coro(data)
+        
+        # 2. Check if we have a valid loop running in the background thread
         if self.loop and self.loop.is_running():
-            asyncio.run_coroutine_threadsafe(
-                self._broadcast_coro(data),
-                self.loop
-            )
+            # 3. Safely hand it over to the thread
+            future = asyncio.run_coroutine_threadsafe(coro, self.loop)
+            
+            # 4. Optional: Print errors if the broadcast fails silently
+            try:
+                # We don't wait for the result to keep it non-blocking, 
+                # but we can catch immediate errors if needed.
+                pass 
+            except Exception as e:
+                print(f"Broadcast error: {e}")
+        else:
+            print("⚠️ Cannot broadcast: WebSocket loop is not running.")
