@@ -4,10 +4,10 @@ import re
 import sys
 from threading import Thread, Event, Lock
 from queue import Queue
-import sounddevice as sd
-import numpy as np
-import parakeet_mlx 
-import mlx.core as mx 
+import sounddevice as sd # type: ignore
+import numpy as np # type: ignore
+import parakeet_mlx  # type: ignore
+import mlx.core as mx  # type: ignore
 from .desktop_speech_music_classifier import SpeechMusicClassifier
 from .config import FS, SAVE_DIR, DESKTOP_DEVICE_ID
 

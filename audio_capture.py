@@ -1,5 +1,5 @@
-import sounddevice as sd
-import numpy as np
+import sounddevice as sd # type: ignore
+import numpy as np # type: ignore
 import threading
 import queue
 import time
