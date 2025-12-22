@@ -1,11 +1,14 @@
+# thomasbalaban/desktop_monitor_gemini/transcriber_core/desktop_transcriber.py
+
 import os
 import time
 import re
 import sys
+import uuid
 from threading import Thread, Event, Lock
 from queue import Queue
-import sounddevice as sd # type: ignore
-import numpy as np # type: ignore
+import sounddevice as sd  # type: ignore
+import numpy as np  # type: ignore
 import parakeet_mlx  # type: ignore
 import mlx.core as mx  # type: ignore
 from .desktop_speech_music_classifier import SpeechMusicClassifier
@@ -25,6 +28,7 @@ class SpeechMusicTranscriber:
         print(f"🎙️ Initializing Parakeet for Desktop Audio (Streaming Mode)...")
             
         try:
+            # Fixing memory issues by ensuring the model is loaded properly
             self.model = parakeet_mlx.from_pretrained("mlx-community/parakeet-tdt-0.6b-v2")
             print("✅ Parakeet model for Desktop is ready.")
         except Exception as e:
@@ -46,9 +50,12 @@ class SpeechMusicTranscriber:
         self.buffer_lock = Lock()
         self.transcriber_stream = None
         
+        # Singular item tracking
+        self.current_session_id = str(uuid.uuid4())
+        
         # --- TUNING PARAMETERS ---
-        self.VOLUME_BOOST = 5.0       # Increased boost
-        self.SILENCE_THRESHOLD = 0.005 # Greatly reduced to prevent cutting off start of words
+        self.VOLUME_BOOST = 5.0       
+        self.SILENCE_THRESHOLD = 0.005 
         # -------------------------
 
         self.name_variations = {
@@ -84,11 +91,12 @@ class SpeechMusicTranscriber:
         """Dedicated thread to feed audio chunks to the Parakeet stream."""
         CHUNK_SIZE = int(self.FS * 0.8) 
         
+        # Initialize variables before the loop to avoid UnboundLocalError
+        last_text = ""
+        
         try:
             with self.model.transcribe_stream() as self.transcriber_stream:
                 print("🎧 Parakeet Streaming Worker started.")
-                
-                last_text_len = 0
                 
                 while not self.stop_event.is_set():
                     audio_to_process = None
@@ -99,40 +107,41 @@ class SpeechMusicTranscriber:
                             self.audio_buffer = self.audio_buffer[CHUNK_SIZE:]
                     
                     if audio_to_process is not None:
-                        # 1. MEASURE & BOOST
-                        # Use max amplitude instead of mean to catch sudden speech starts
                         peak_amp = np.max(np.abs(audio_to_process))
                         
-                        boosted_audio = audio_to_process * self.VOLUME_BOOST
-                        boosted_audio = np.clip(boosted_audio, -1.0, 1.0)
+                        # --- FIX FOR DOUBLE FREE ---
+                        # Explicitly evaluate the array before passing to the stream
+                        input_mx = mx.array(audio_to_process * self.VOLUME_BOOST)
+                        mx.eval(input_mx)
+                        self.transcriber_stream.add_audio(input_mx)
                         
-                        # 2. FEED AUDIO
-                        self.transcriber_stream.add_audio(mx.array(boosted_audio))
-                        
-                        # 3. GET RESULT
-                        # Only process output if we actually have signal (prevents hallucinations)
+                        # Process results if we have actual sound
                         if peak_amp > self.SILENCE_THRESHOLD:
                             current_result = self.transcriber_stream.result
                             
                             if current_result and hasattr(current_result, 'text'):
                                 full_text = current_result.text.strip()
                                 
-                                # Send updates if text has changed/grown
-                                if len(full_text) > last_text_len:
-                                    # --- SMOOTH CONSOLE LOG ---
-                                    # Use \r to overwrite the line instead of new lines
-                                    # We print the LAST 60 chars so it doesn't wrap weirdly
+                                # Only emit if text has grown or changed
+                                if full_text != last_text:
+                                    # Visual console feedback
                                     display_text = full_text[-80:].replace('\n', ' ')
                                     sys.stdout.write(f"\r🦜 {display_text}")
                                     sys.stdout.flush()
-                                    # --------------------------
 
                                     corrected = self._apply_name_correction(full_text)
-                                    payload = (corrected, None, "desktop_partial", 0.9)
+                                    # Passing session_id as the 'filename' parameter so transcription_service can find it
+                                    payload = (corrected, self.current_session_id, "desktop_partial", 0.9)
                                     self.result_queue.put(payload)
                                     
-                                    last_text_len = len(full_text)
+                                    last_text = full_text
                                     self.last_processed = time.time()
+                        else:
+                            # If silence has lasted long enough, reset the session to start a new "singular item"
+                            if time.time() - self.last_processed > 3.0 and last_text != "":
+                                self.current_session_id = str(uuid.uuid4())
+                                last_text = ""
+                                print("\n🍃 [Desktop] Silence detected, session reset.")
                         
                     time.sleep(0.05)
                     

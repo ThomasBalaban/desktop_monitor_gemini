@@ -169,25 +169,18 @@ def transcription_process_target(result_queue, stop_event):
                 if not desktop_transcriber.result_queue.empty():
                     # The Parakeet Desktop Transcriber sends: (text, None, source, conf)
                     # source can be "desktop" or "desktop_partial"
-                    text, filename, source, conf = desktop_transcriber.result_queue.get_nowait()
+                    text, session_id, source, conf = desktop_transcriber.result_queue.get_nowait()
                     should_output, final_text, is_partial = deduplicator.process(text, source)
                     
-                    if should_output:
+                    if source == "desktop_partial":
                         payload = {
-                            "type": "transcript",
-                            "source": "desktop",
-                            "audio_type": "speech", 
-                            "text": final_text,
-                            "confidence": conf,
-                            "timestamp": time.time(),
-                            "is_partial": is_partial
+                            "type": "partial_transcript",
+                            "source": "desktop_live",
+                            "text": text,
+                            "session_id": session_id, # Target ID for the UI
+                            "is_partial": True,
+                            "timestamp": time.time()
                         }
-                        
-                        # Adjust payload for live/partial events
-                        if is_partial:
-                            payload["type"] = "partial_transcript"
-                            payload["source"] = "desktop_live"
-                            
                         result_queue.put(payload)
                     desktop_transcriber.result_queue.task_done()
             except Empty:
