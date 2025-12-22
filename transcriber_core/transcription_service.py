@@ -3,6 +3,7 @@ import multiprocessing
 import traceback
 import sys
 import os
+import signal
 from queue import Empty
 from difflib import SequenceMatcher
 
@@ -117,23 +118,61 @@ class TranscriptionDeduplicator:
             self.recent_transcripts[source] = (text, current_time)
             return True, text, is_partial
 
+
+# Global references for cleanup in signal handler
+_mic_transcriber = None
+_desktop_transcriber = None
+
+
 def transcription_process_target(result_queue, stop_event):
     """
     This function runs in a separate PROCESS.
     It isolates the heavy ML models from the GUI.
     """
+    global _mic_transcriber, _desktop_transcriber
+    
     print("🧠 [SENSES] Initializing Local Transcription Engines...")
+    
+    # Setup signal handlers for graceful shutdown
+    def signal_handler(signum, frame):
+        print(f"\n🛑 [SENSES] Received signal {signum}, cleaning up...")
+        stop_event.set()
+        cleanup_transcribers()
+        sys.exit(0)
+    
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+    
+    def cleanup_transcribers():
+        """Cleanup both transcribers."""
+        global _mic_transcriber, _desktop_transcriber
+        
+        if _mic_transcriber:
+            try:
+                _mic_transcriber.stop_event.set()
+                if hasattr(_mic_transcriber, 'cleanup'):
+                    _mic_transcriber.cleanup()
+            except Exception as e:
+                print(f"⚠️ Error cleaning up mic transcriber: {e}")
+        
+        if _desktop_transcriber:
+            try:
+                _desktop_transcriber.stop_event.set()
+                if hasattr(_desktop_transcriber, 'cleanup'):
+                    _desktop_transcriber.cleanup()
+            except Exception as e:
+                print(f"⚠️ Error cleaning up desktop transcriber: {e}")
     
     try:
         # Initialize Engines
-        mic_transcriber = MicrophoneTranscriber(keep_files=False)
-        desktop_transcriber = DesktopTranscriber(keep_files=False)
+        _mic_transcriber = MicrophoneTranscriber(keep_files=False)
+        _desktop_transcriber = DesktopTranscriber(keep_files=False)
         deduplicator = TranscriptionDeduplicator(similarity_threshold=0.70)
 
         # Start Threads
         import threading
-        mic_thread = threading.Thread(target=mic_transcriber.run, daemon=True, name="MicThread")
-        desktop_thread = threading.Thread(target=desktop_transcriber.run, daemon=True, name="DesktopThread")
+        mic_thread = threading.Thread(target=_mic_transcriber.run, daemon=True, name="MicThread")
+        desktop_thread = threading.Thread(target=_desktop_transcriber.run, daemon=True, name="DesktopThread")
         
         desktop_thread.start()
         time.sleep(1) # Small stagger to prevent CPU spike
@@ -144,8 +183,8 @@ def transcription_process_target(result_queue, stop_event):
         while not stop_event.is_set():
             # 1. Check Microphone
             try:
-                if not mic_transcriber.result_queue.empty():
-                    text, filename, source, conf = mic_transcriber.result_queue.get_nowait()
+                if not _mic_transcriber.result_queue.empty():
+                    text, filename, source, conf = _mic_transcriber.result_queue.get_nowait()
                     should_output, final_text, is_partial = deduplicator.process(text, "microphone")
                     
                     if should_output:
@@ -158,7 +197,7 @@ def transcription_process_target(result_queue, stop_event):
                             "is_partial": is_partial
                         }
                         result_queue.put(payload)
-                    mic_transcriber.result_queue.task_done()
+                    _mic_transcriber.result_queue.task_done()
             except Empty:
                 pass
             except Exception as e:
@@ -166,23 +205,23 @@ def transcription_process_target(result_queue, stop_event):
 
             # 2. Check Desktop
             try:
-                if not desktop_transcriber.result_queue.empty():
-                    # The Parakeet Desktop Transcriber sends: (text, None, source, conf)
-                    # source can be "desktop" or "desktop_partial"
-                    text, session_id, source, conf = desktop_transcriber.result_queue.get_nowait()
+                if not _desktop_transcriber.result_queue.empty():
+                    # The Parakeet Desktop Transcriber sends: (text, session_id, source, conf)
+                    text, session_id, source, conf = _desktop_transcriber.result_queue.get_nowait()
                     should_output, final_text, is_partial = deduplicator.process(text, source)
                     
-                    if source == "desktop_partial":
+                    if should_output and final_text:
                         payload = {
-                            "type": "partial_transcript",
-                            "source": "desktop_live",
-                            "text": text,
-                            "session_id": session_id, # Target ID for the UI
-                            "is_partial": True,
+                            "type": "transcript",
+                            "source": "desktop",
+                            "text": final_text,
+                            "session_id": session_id,
+                            "confidence": conf,
+                            "is_partial": is_partial,
                             "timestamp": time.time()
                         }
                         result_queue.put(payload)
-                    desktop_transcriber.result_queue.task_done()
+                    _desktop_transcriber.result_queue.task_done()
             except Empty:
                 pass
             except Exception as e:
@@ -195,11 +234,9 @@ def transcription_process_target(result_queue, stop_event):
         traceback.print_exc()
     finally:
         print("🛑 [SENSES] Stopping Transcription Engines...")
-        try:
-            mic_transcriber.stop_event.set()
-            desktop_transcriber.stop_event.set()
-        except:
-            pass
+        cleanup_transcribers()
+        print("✅ [SENSES] Cleanup complete.")
+
 
 class TranscriptionService:
     def __init__(self):
@@ -220,12 +257,32 @@ class TranscriptionService:
         self.process.start()
     
     def stop(self):
+        print("🛑 [TranscriptionService] Stopping...")
         self.stop_event.set()
+        
         if self.process:
-            self.process.join(timeout=3)
+            # Give the process time to cleanup gracefully
+            self.process.join(timeout=5)
+            
             if self.process.is_alive():
+                print("⚠️ [TranscriptionService] Process didn't stop gracefully, terminating...")
                 self.process.terminate()
+                self.process.join(timeout=2)
+                
+                if self.process.is_alive():
+                    print("⚠️ [TranscriptionService] Force killing process...")
+                    self.process.kill()
+            
             self.process = None
+        
+        # Clear the queue
+        while not self.result_queue.empty():
+            try:
+                self.result_queue.get_nowait()
+            except Empty:
+                break
+        
+        print("✅ [TranscriptionService] Stopped.")
 
     def get_results(self):
         results = []

@@ -7,6 +7,7 @@ import sys
 import uuid
 from threading import Thread, Event, Lock
 from queue import Queue
+from difflib import SequenceMatcher
 import sounddevice as sd  # type: ignore
 import numpy as np  # type: ignore
 import parakeet_mlx  # type: ignore
@@ -28,7 +29,6 @@ class SpeechMusicTranscriber:
         print(f"🎙️ Initializing Parakeet for Desktop Audio (Streaming Mode)...")
             
         try:
-            # Fixing memory issues by ensuring the model is loaded properly
             self.model = parakeet_mlx.from_pretrained("mlx-community/parakeet-tdt-0.6b-v2")
             print("✅ Parakeet model for Desktop is ready.")
         except Exception as e:
@@ -50,7 +50,7 @@ class SpeechMusicTranscriber:
         self.buffer_lock = Lock()
         self.transcriber_stream = None
         
-        # Singular item tracking
+        # Session tracking
         self.current_session_id = str(uuid.uuid4())
         
         # --- TUNING PARAMETERS ---
@@ -65,6 +65,27 @@ class SpeechMusicTranscriber:
             r'\bgnomey\b': 'Nami', r'\barmy\b': 'Nami', r'\bpeepingnaomi\b': 'PeepingNami', 
             r'\bpeepingnomi\b': 'PeepingNami'
         }
+
+    def cleanup(self):
+        """Explicitly cleanup Parakeet resources."""
+        print("🧹 [Desktop] Cleaning up Parakeet resources...")
+        
+        # Clear the transcriber stream reference
+        self.transcriber_stream = None
+        
+        # Clear the model reference
+        if hasattr(self, 'model'):
+            self.model = None
+        
+        # Force MLX to clear its memory
+        try:
+            mx.metal.clear_cache()
+            print("✅ [Desktop] MLX metal cache cleared.")
+        except Exception as e:
+            print(f"⚠️ [Desktop] Could not clear MLX cache: {e}")
+        
+        # Clear audio buffer
+        self.audio_buffer = np.array([], dtype=np.float32)
 
     def _apply_name_correction(self, text):
         corrected_text = text
@@ -89,14 +110,34 @@ class SpeechMusicTranscriber:
 
     def streaming_worker(self):
         """Dedicated thread to feed audio chunks to the Parakeet stream."""
-        CHUNK_SIZE = int(self.FS * 0.8) 
+        # Use 1.5 second chunks like the reference example
+        CHUNK_SIZE = int(self.FS * 1.5) 
         
-        # Initialize variables before the loop to avoid UnboundLocalError
-        last_text = ""
+        # Sentence splitting pattern: . ! ? ... ....
+        # Match sentences ending with these punctuation marks
+        sentence_pattern = re.compile(r'[^.!?]*(?:\.{3,4}|[.!?])')
+        
+        # Track what we've already emitted
+        emitted_sentences = []  # List of sentences we've already emitted (for fuzzy matching)
+        last_full_text = ""
+        last_emit_text = ""  # The exact text of the last emission (to prevent duplicates)
+        
+        # Fuzzy matching threshold (0.0 to 1.0)
+        SIMILARITY_THRESHOLD = 0.80
+        
+        def is_sentence_emitted(sentence, emitted_list):
+            """Check if sentence is similar enough to any already-emitted sentence."""
+            s_normalized = sentence.lower().strip()
+            for emitted in emitted_list:
+                ratio = SequenceMatcher(None, s_normalized, emitted).ratio()
+                if ratio >= SIMILARITY_THRESHOLD:
+                    return True
+            return False
         
         try:
             with self.model.transcribe_stream() as self.transcriber_stream:
-                print("🎧 Parakeet Streaming Worker started.")
+                print("🎧 Parakeet Streaming Worker started (3-sentence buffer mode with fuzzy matching).")
+                print(f"   Similarity threshold: {SIMILARITY_THRESHOLD}")
                 
                 while not self.stop_event.is_set():
                     audio_to_process = None
@@ -104,44 +145,111 @@ class SpeechMusicTranscriber:
                     with self.buffer_lock:
                         if len(self.audio_buffer) >= CHUNK_SIZE:
                             audio_to_process = self.audio_buffer[:CHUNK_SIZE].copy()
-                            self.audio_buffer = self.audio_buffer[CHUNK_SIZE:]
+                            remaining = self.audio_buffer[CHUNK_SIZE:]
+                            self.audio_buffer = remaining if len(remaining) > 0 else np.array([], dtype=np.float32)
                     
                     if audio_to_process is not None:
                         peak_amp = np.max(np.abs(audio_to_process))
                         
-                        # --- FIX FOR DOUBLE FREE ---
-                        # Explicitly evaluate the array before passing to the stream
+                        # Add audio to transcriber (with volume boost)
                         input_mx = mx.array(audio_to_process * self.VOLUME_BOOST)
-                        mx.eval(input_mx)
                         self.transcriber_stream.add_audio(input_mx)
                         
-                        # Process results if we have actual sound
-                        if peak_amp > self.SILENCE_THRESHOLD:
-                            current_result = self.transcriber_stream.result
+                        # Get result
+                        result = self.transcriber_stream.result
+                        
+                        if result and hasattr(result, 'text'):
+                            current_full_text = result.text.strip()
                             
-                            if current_result and hasattr(current_result, 'text'):
-                                full_text = current_result.text.strip()
+                            # Only process if text has changed
+                            if current_full_text != last_full_text:
+                                last_full_text = current_full_text
                                 
-                                # Only emit if text has grown or changed
-                                if full_text != last_text:
-                                    # Visual console feedback
-                                    display_text = full_text[-80:].replace('\n', ' ')
-                                    sys.stdout.write(f"\r🦜 {display_text}")
-                                    sys.stdout.flush()
-
-                                    corrected = self._apply_name_correction(full_text)
-                                    # Passing session_id as the 'filename' parameter so transcription_service can find it
-                                    payload = (corrected, self.current_session_id, "desktop_partial", 0.9)
-                                    self.result_queue.put(payload)
+                                # Apply name corrections to full text
+                                corrected_text = self._apply_name_correction(current_full_text)
+                                
+                                # Split into ALL sentences
+                                all_sentences = sentence_pattern.findall(corrected_text)
+                                all_sentences = [s.strip() for s in all_sentences if s.strip()]
+                                
+                                # Filter out sentences we've already emitted (using fuzzy matching)
+                                new_sentences = []
+                                for s in all_sentences:
+                                    if not is_sentence_emitted(s, emitted_sentences):
+                                        new_sentences.append(s)
+                                
+                                # Check for partial sentence at the end
+                                partial_buffer = ""
+                                if all_sentences:
+                                    last_sentence_end = corrected_text.rfind(all_sentences[-1]) + len(all_sentences[-1])
+                                    partial_buffer = corrected_text[last_sentence_end:].strip()
+                                else:
+                                    partial_buffer = corrected_text
+                                
+                                # Visual feedback
+                                display_sentences = f"[{len(new_sentences)} new sentences]"
+                                if new_sentences:
+                                    last_sent = new_sentences[-1][-40:] if len(new_sentences[-1]) > 40 else new_sentences[-1]
+                                    display_sentences += f" Last: {last_sent}"
+                                if partial_buffer:
+                                    display_sentences += f" | Partial: {partial_buffer[-30:]}"
+                                sys.stdout.write(f"\r🦜 {display_sentences}")
+                                sys.stdout.flush()
+                                
+                                # Check if we have 3+ NEW sentences - emit first 2
+                                if len(new_sentences) >= 3:
+                                    to_emit = new_sentences[:2]
+                                    emit_text = ' '.join(to_emit)
                                     
-                                    last_text = full_text
-                                    self.last_processed = time.time()
-                        else:
-                            # If silence has lasted long enough, reset the session to start a new "singular item"
-                            if time.time() - self.last_processed > 3.0 and last_text != "":
+                                    # Only emit if different from last emission
+                                    if emit_text != last_emit_text:
+                                        print(f"\n✅ [EMIT] {emit_text}")
+                                        
+                                        payload = (emit_text, self.current_session_id, "desktop", 0.9)
+                                        self.result_queue.put(payload)
+                                        
+                                        last_emit_text = emit_text
+                                        
+                                        # Mark these sentences as emitted (store normalized for fuzzy matching)
+                                        for s in to_emit:
+                                            emitted_sentences.append(s.lower().strip())
+                                    
+                                self.last_processed = time.time()
+                        
+                        # Check for silence
+                        if peak_amp <= self.SILENCE_THRESHOLD:
+                            if time.time() - self.last_processed > 3.0:
+                                # Get any remaining new sentences
+                                if last_full_text:
+                                    corrected_text = self._apply_name_correction(last_full_text)
+                                    all_sentences = sentence_pattern.findall(corrected_text)
+                                    all_sentences = [s.strip() for s in all_sentences if s.strip()]
+                                    
+                                    # Get un-emitted sentences (fuzzy match)
+                                    remaining_sentences = [s for s in all_sentences if not is_sentence_emitted(s, emitted_sentences)]
+                                    
+                                    # Also get any partial at the end
+                                    partial = ""
+                                    if all_sentences:
+                                        last_end = corrected_text.rfind(all_sentences[-1]) + len(all_sentences[-1])
+                                        partial = corrected_text[last_end:].strip()
+                                    
+                                    remaining_text = ' '.join(remaining_sentences)
+                                    if partial:
+                                        remaining_text = (remaining_text + ' ' + partial).strip()
+                                    
+                                    if remaining_text and remaining_text != last_emit_text:
+                                        print(f"\n🍃 [SILENCE FLUSH] {remaining_text}")
+                                        
+                                        payload = (remaining_text, self.current_session_id, "desktop", 0.9)
+                                        self.result_queue.put(payload)
+                                
+                                # Reset for new session
                                 self.current_session_id = str(uuid.uuid4())
-                                last_text = ""
-                                print("\n🍃 [Desktop] Silence detected, session reset.")
+                                last_full_text = ""
+                                last_emit_text = ""
+                                emitted_sentences.clear()
+                                print("\n🍃 [Desktop] Session reset.")
                         
                     time.sleep(0.05)
                     
@@ -171,7 +279,8 @@ class SpeechMusicTranscriber:
             }
             
             with sd.InputStream(**stream_kwargs):
-                print(f"🎧 Listening to desktop audio (device {self.DESKTOP_DEVICE_ID}) with live streaming...")
+                print(f"🎧 Listening to desktop audio (device {self.DESKTOP_DEVICE_ID}) - RAW FINALIZED MODE")
+                print(f"   Emitting new finalized tokens as they arrive...")
                 while not self.stop_event.is_set():
                     time.sleep(0.1)
 
@@ -182,4 +291,5 @@ class SpeechMusicTranscriber:
         finally:
             self.stop_event.set()
             print("\nShutting down desktop transcriber...")
+            self.cleanup()
             print("🖥️ Desktop transcription stopped.")
