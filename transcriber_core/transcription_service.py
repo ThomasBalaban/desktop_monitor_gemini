@@ -1,3 +1,13 @@
+# transcriber_core/transcription_service.py
+"""
+Transcription Service - Manages both Microphone (Parakeet) and Desktop (faster-whisper) transcribers.
+
+Architecture:
+- Runs transcription engines in a separate PROCESS to isolate heavy ML models from the GUI.
+- Microphone uses Parakeet MLX streaming (great for natural speech with pauses)
+- Desktop uses faster-whisper with VAD batch processing (reliable for continuous audio)
+"""
+
 import time
 import multiprocessing
 import traceback
@@ -11,7 +21,9 @@ try:
     from transcriber_core import MicrophoneTranscriber
     from transcriber_core import DesktopTranscriber
 except ImportError:
-    print("CRITICAL ERROR: Could not import 'transcriber_core'. Make sure you copied the folder from audio_mon to this project's root.")
+    print("CRITICAL ERROR: Could not import 'transcriber_core'. Make sure the module is properly installed.")
+    raise
+
 
 class TranscriptionDeduplicator:
     """Filters out overlapping/duplicate transcriptions with continuation detection"""
@@ -20,14 +32,14 @@ class TranscriptionDeduplicator:
         self.recent_transcripts = {}  # source -> (text, timestamp)
         self.similarity_threshold = similarity_threshold
         self.time_window = time_window
-        self.overlap_words = overlap_words  # Min words to check for overlap
+        self.overlap_words = overlap_words
         
     def _get_overlap_length(self, prev_text, curr_text):
         """Calculate how many words overlap at the end of prev and start of curr"""
         prev_words = prev_text.lower().split()
         curr_words = curr_text.lower().split()
         
-        max_check = min(len(prev_words), len(curr_words), 10)  # Check up to 10 words
+        max_check = min(len(prev_words), len(curr_words), 10)
         overlap_length = 0
         
         for i in range(1, max_check + 1):
@@ -41,11 +53,9 @@ class TranscriptionDeduplicator:
         prev_lower = prev_text.lower().strip()
         curr_lower = curr_text.lower().strip()
         
-        # Check substring
         if curr_lower in prev_lower or prev_lower in curr_lower:
             return True
         
-        # Check high similarity
         ratio = SequenceMatcher(None, prev_lower, curr_lower).ratio()
         return ratio > self.similarity_threshold
     
@@ -57,15 +67,10 @@ class TranscriptionDeduplicator:
         current_time = time.time()
         is_partial = False
         
-        # --- NEW LOGIC: Handle live partial updates instantly ---
-        # The transcriber sends the source 'desktop_partial' for live word updates
+        # Handle partial updates
         if source.endswith("_partial"):
             is_partial = True
-            # Immediately output partial updates without updating history
-            return True, text, is_partial 
-        # --- END NEW LOGIC ---
-        
-        # Logic for FINAL/FULL results (source is "microphone" or "desktop")
+            return True, text, is_partial
         
         # Get most recent from this source
         if source in self.recent_transcripts:
@@ -73,53 +78,42 @@ class TranscriptionDeduplicator:
             
             # Check if too old
             if current_time - prev_timestamp > self.time_window:
-                # Old enough to be separate
                 self.recent_transcripts[source] = (text, current_time)
                 return True, text, is_partial
             
             # Check for duplicate/substring
             if self._is_substring_or_similar(prev_text, text):
-                # Skip if current is contained in previous
                 if text.lower().strip() in prev_text.lower():
                     return False, None, is_partial
-                # Update if current contains previous (it's longer)
                 elif prev_text.lower().strip() in text.lower():
                     self.recent_transcripts[source] = (text, current_time)
                     return True, text, is_partial
                 else:
-                    # Very similar, skip
                     return False, None, is_partial
             
-            # Check for continuation (overlapping words)
+            # Check for continuation
             overlap_length = self._get_overlap_length(prev_text, text)
             
             if overlap_length >= self.overlap_words:
-                # This is a continuation, merge them
                 curr_words = text.split()
-                
-                # Remove overlapping words from current
                 unique_part = " ".join(curr_words[overlap_length:])
                 
                 if unique_part.strip():
-                    # Merge: previous + new unique part
                     merged_text = prev_text + " " + unique_part
                     self.recent_transcripts[source] = (merged_text, current_time)
                     return True, merged_text, is_partial
                 else:
-                    # No new content, skip
                     return False, None, is_partial
             
-            # Not a continuation or duplicate, treat as new
             self.recent_transcripts[source] = (text, current_time)
             return True, text, is_partial
         
         else:
-            # First time seeing this source
             self.recent_transcripts[source] = (text, current_time)
             return True, text, is_partial
 
 
-# Global references for cleanup in signal handler
+# Global references for cleanup
 _mic_transcriber = None
 _desktop_transcriber = None
 
@@ -131,9 +125,10 @@ def transcription_process_target(result_queue, stop_event):
     """
     global _mic_transcriber, _desktop_transcriber
     
-    print("🧠 [SENSES] Initializing Local Transcription Engines...")
+    print("🧠 [SENSES] Initializing Transcription Engines...")
+    print("   • Microphone: Parakeet MLX (streaming)")
+    print("   • Desktop: faster-whisper (VAD batch)")
     
-    # Setup signal handlers for graceful shutdown
     def signal_handler(signum, frame):
         print(f"\n🛑 [SENSES] Received signal {signum}, cleaning up...")
         stop_event.set()
@@ -144,7 +139,6 @@ def transcription_process_target(result_queue, stop_event):
     signal.signal(signal.SIGINT, signal_handler)
     
     def cleanup_transcribers():
-        """Cleanup both transcribers."""
         global _mic_transcriber, _desktop_transcriber
         
         if _mic_transcriber:
@@ -175,19 +169,20 @@ def transcription_process_target(result_queue, stop_event):
         desktop_thread = threading.Thread(target=_desktop_transcriber.run, daemon=True, name="DesktopThread")
         
         desktop_thread.start()
-        time.sleep(1) # Small stagger to prevent CPU spike
+        time.sleep(1)
         mic_thread.start()
         
-        print("✅ [SENSES] Local Ears Open (Parakeet Streaming Running)")
+        print("✅ [SENSES] Both transcription systems running")
 
         while not stop_event.is_set():
-            # 1. Check Microphone
+            # 1. Check Microphone Queue
             try:
                 if not _mic_transcriber.result_queue.empty():
+                    # Microphone output: (text, filename, source, confidence)
                     text, filename, source, conf = _mic_transcriber.result_queue.get_nowait()
                     should_output, final_text, is_partial = deduplicator.process(text, "microphone")
                     
-                    if should_output:
+                    if should_output and final_text:
                         payload = {
                             "type": "transcript",
                             "source": "microphone",
@@ -203,10 +198,10 @@ def transcription_process_target(result_queue, stop_event):
             except Exception as e:
                 print(f"Mic Queue Error: {e}")
 
-            # 2. Check Desktop
+            # 2. Check Desktop Queue
             try:
                 if not _desktop_transcriber.result_queue.empty():
-                    # The Parakeet Desktop Transcriber sends: (text, session_id, source, conf)
+                    # Desktop output: (text, session_id, source, confidence)
                     text, session_id, source, conf = _desktop_transcriber.result_queue.get_nowait()
                     should_output, final_text, is_partial = deduplicator.process(text, source)
                     
@@ -227,7 +222,7 @@ def transcription_process_target(result_queue, stop_event):
             except Exception as e:
                 print(f"Desktop Queue Error: {e}")
 
-            time.sleep(0.02) # Faster loop for responsiveness
+            time.sleep(0.02)
 
     except Exception as e:
         print(f"❌ [SENSES] Critical Transcription Failure: {e}")
@@ -239,12 +234,18 @@ def transcription_process_target(result_queue, stop_event):
 
 
 class TranscriptionService:
+    """
+    Main service class that manages the transcription subprocess.
+    Use from the main application to start/stop transcription and get results.
+    """
+    
     def __init__(self):
         self.process = None
         self.result_queue = multiprocessing.Queue()
         self.stop_event = multiprocessing.Event()
 
     def start(self):
+        """Start the transcription subprocess."""
         if self.process is not None and self.process.is_alive():
             return
         
@@ -257,11 +258,11 @@ class TranscriptionService:
         self.process.start()
     
     def stop(self):
+        """Stop the transcription subprocess gracefully."""
         print("🛑 [TranscriptionService] Stopping...")
         self.stop_event.set()
         
         if self.process:
-            # Give the process time to cleanup gracefully
             self.process.join(timeout=5)
             
             if self.process.is_alive():
@@ -285,6 +286,10 @@ class TranscriptionService:
         print("✅ [TranscriptionService] Stopped.")
 
     def get_results(self):
+        """
+        Get all available transcription results from the queue.
+        Returns a list of result dictionaries.
+        """
         results = []
         while not self.result_queue.empty():
             try:
