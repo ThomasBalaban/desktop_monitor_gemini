@@ -2,6 +2,7 @@ import tkinter as tk
 from datetime import datetime
 import threading
 import time
+import os
 
 from config_loader import ConfigLoader
 from gemini_client import GeminiClient
@@ -10,23 +11,22 @@ from streaming_manager import StreamingManager
 from app_gui import AppGUI
 from websocket_server import WebSocketServer, WEBSOCKET_PORT
 
-# Import the new service
-from transcriber_core.transcription_service import TranscriptionService
+# --- NEW IMPORTS FOR OPENAI REALTIME ---
+from openai_realtime_client import OpenAIRealtimeClient
+from transcriber_core.openai_streamer import SmartAudioTranscriber
 
 class AppController:
     def __init__(self):
         self.config = ConfigLoader()
-        print("Gemini Screen Watcher - Starting up...")
+        print("Gemini Screen Watcher + OpenAI Audio - Starting up...")
         
-        # 1. Initialize Transcription Service
-        self.transcription_service = TranscriptionService()
-        
-        # --- PASS VIDEO INDEX HERE ---
+        # 1. Initialize Screen Capture (Kept for Gemini Vision)
         self.screen_capture = ScreenCapture(
             self.config.image_quality, 
             video_index=self.config.video_device_index
         )
         
+        # 2. Initialize Gemini Client (Kept for Visual Analysis)
         self.gemini_client = GeminiClient(
             self.config.api_key, 
             self.config.prompt, 
@@ -38,6 +38,7 @@ class AppController:
             audio_sample_rate=self.config.audio_sample_rate
         )
 
+        # 3. Initialize Streaming Manager (Manages Gemini Vision Stream)
         self.streaming_manager = StreamingManager(
             self.screen_capture, self.gemini_client, self.config.fps,
             restart_interval=1500, debug_mode=self.config.debug_mode
@@ -46,18 +47,37 @@ class AppController:
         self.streaming_manager.set_error_callback(self._on_streaming_error)
         self.streaming_manager.set_preview_callback(self.gui_update_wrapper)
         
+        # 4. Initialize WebSocket Server
         self.websocket_server = WebSocketServer()
         self.current_response_buffer = ""
+        
+        # 5. Initialize GUI
         self.gui = AppGUI(self)
         
+        # --- NEW: Initialize OpenAI Realtime Components ---
+        if not self.config.is_openai_key_configured():
+            print("⚠️ WARNING: OPENAI_API_KEY not configured. Audio transcription will not work.")
+            self.gui.add_error("OPENAI_API_KEY missing in api_keys.py")
+            self.openai_client = None
+            self.smart_transcriber = None
+        else:
+            self.openai_client = OpenAIRealtimeClient(
+                api_key=self.config.openai_api_key,
+                on_text_delta=self._handle_smart_transcript,
+                on_error=self._on_openai_error
+            )
+            # PASS THE DEVICE ID FROM MAIN CONFIG HERE
+            self.smart_transcriber = SmartAudioTranscriber(
+                self.openai_client, 
+                device_id=self.config.audio_device_id
+            )
+
         # Only init region if we are NOT using a camera
         if self.config.video_device_index is None:
             self._initialize_capture_region()
             
+        # Delay stream start slightly to allow UI to load
         self.gui.root.after(2000, self._start_stream_on_init)
-        
-        # Start Poll Loop for Transcripts
-        self.gui.root.after(1000, self._poll_transcripts)
 
     def gui_update_wrapper(self, frame):
         # We need this because streaming_manager runs in a thread
@@ -66,12 +86,13 @@ class AppController:
 
     def run(self):
         # Start Senses
-        print("Starting Transcription Service...")
-        self.transcription_service.start()
+        if self.smart_transcriber:
+            print(f"🎙️ Starting OpenAI Realtime Audio Stream on Device {self.config.audio_device_id}...")
+            self.smart_transcriber.start()
         
         if not self.config.is_api_key_configured():
-            self.gui.update_status("ERROR: API_KEY not configured", "red")
-            self.gui.add_error("API_KEY not configured.")
+            self.gui.update_status("ERROR: GEMINI_API_KEY not configured", "red")
+            self.gui.add_error("GEMINI_API_KEY not configured.")
         
         self.websocket_server.start()
         
@@ -80,28 +101,47 @@ class AppController:
         finally:
             # Cleanup on exit
             print("Shutting down services...")
-            self.transcription_service.stop()
+            if self.smart_transcriber:
+                self.smart_transcriber.stop()
             self.streaming_manager.stop_streaming()
 
-    def _poll_transcripts(self):
-        """Check for new local transcripts and handle them."""
-        results = self.transcription_service.get_results()
+    # --- NEW: OpenAI Realtime Callbacks ---
+    
+    def _handle_smart_transcript(self, delta):
+        """
+        Receives text deltas from GPT-4o-Audio.
+        1. Prints to console.
+        2. Broadcasts to WebSocket.
+        3. Updates GUI (Appending to feed).
+        """
+        # 1. Console Output
+        print(delta, end="", flush=True)
         
-        for res in results:
-            # 1. Broadcast to Brain (via WebSocket)
-            self.websocket_server.broadcast(res)
-            
-            # 2. Update Console log
-            source_icon = "🎤" if res['source'] == "microphone" else "🖥️"
-            if self.config.debug_mode:
-                print(f"{source_icon} [{res['source'].upper()}] {res['text']}")
-            
-            # 3. Feed to Gemini (Context Injection)
-            # We want Gemini to know what was said locally
-            self.streaming_manager.inject_transcript(res['text'], res['source'])
+        # 2. WebSocket Broadcast
+        self.websocket_server.broadcast({
+            "type": "transcript_delta",
+            "source": "gpt-4o-audio",
+            "text": delta,
+            "timestamp": time.time()
+        })
+        
+        # 3. GUI Update
+        if self.gui:
+             # Use `after` to be thread-safe with Tkinter
+            self.gui.root.after(0, lambda: self._append_transcript_to_gui(delta))
 
-        # Run again in 100ms
-        self.gui.root.after(100, self._poll_transcripts)
+    def _append_transcript_to_gui(self, text):
+        """Appends streaming text to the GUI feed window."""
+        self.gui.feed_text.configure(state=tk.NORMAL)
+        self.gui.feed_text.insert(tk.END, text)
+        self.gui.feed_text.see(tk.END)
+        self.gui.feed_text.configure(state=tk.DISABLED)
+
+    def _on_openai_error(self, error_msg):
+        print(f"❌ OpenAI Error: {error_msg}")
+        self.gui.add_error(f"OpenAI Error: {error_msg}")
+
+    # --- Existing Functionality ---
 
     def request_analysis(self):
         print("Manual analysis triggered.")

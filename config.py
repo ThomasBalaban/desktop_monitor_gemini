@@ -1,7 +1,8 @@
-from api_keys import GEMINI_API_KEY
+from api_keys import GEMINI_API_KEY, OPENAI_API_KEY
 
 # API Key
 API_KEY = GEMINI_API_KEY
+OPENAI_API_KEY = OPENAI_API_KEY
 
 # Debug Mode - set to True to see detailed console messages
 DEBUG_MODE = False
