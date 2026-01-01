@@ -11,7 +11,7 @@ from streaming_manager import StreamingManager
 from app_gui import AppGUI
 from websocket_server import WebSocketServer, WEBSOCKET_PORT
 
-# --- NEW IMPORTS FOR OPENAI REALTIME ---
+# --- IMPORTS FOR OPENAI REALTIME ---
 from openai_realtime_client import OpenAIRealtimeClient
 from transcriber_core.openai_streamer import SmartAudioTranscriber
 
@@ -54,7 +54,7 @@ class AppController:
         # 5. Initialize GUI
         self.gui = AppGUI(self)
         
-        # --- NEW: Initialize OpenAI Realtime Components ---
+        # --- Initialize OpenAI Realtime (Transcription Only) ---
         if not self.config.is_openai_key_configured():
             print("⚠️ WARNING: OPENAI_API_KEY not configured. Audio transcription will not work.")
             self.gui.add_error("OPENAI_API_KEY missing in api_keys.py")
@@ -63,10 +63,9 @@ class AppController:
         else:
             self.openai_client = OpenAIRealtimeClient(
                 api_key=self.config.openai_api_key,
-                on_text_delta=self._handle_smart_transcript,
+                on_transcript=self._handle_transcription,  # Only callback needed now
                 on_error=self._on_openai_error
             )
-            # PASS THE DEVICE ID FROM MAIN CONFIG HERE
             self.smart_transcriber = SmartAudioTranscriber(
                 self.openai_client, 
                 device_id=self.config.audio_device_id
@@ -80,12 +79,11 @@ class AppController:
         self.gui.root.after(2000, self._start_stream_on_init)
 
     def gui_update_wrapper(self, frame):
-        # We need this because streaming_manager runs in a thread
         if self.gui:
             self.gui.update_preview(frame)
 
     def run(self):
-        # Start Senses
+        # Start Audio Transcription
         if self.smart_transcriber:
             print(f"🎙️ Starting OpenAI Realtime Audio Stream on Device {self.config.audio_device_id}...")
             self.smart_transcriber.start()
@@ -99,39 +97,35 @@ class AppController:
         try:
             self.gui.run()
         finally:
-            # Cleanup on exit
             print("Shutting down services...")
             if self.smart_transcriber:
                 self.smart_transcriber.stop()
             self.streaming_manager.stop_streaming()
 
-    # --- NEW: OpenAI Realtime Callbacks ---
+    # --- OpenAI Transcription Callback ---
     
-    def _handle_smart_transcript(self, delta):
+    def _handle_transcription(self, transcript):
         """
-        Receives text deltas from GPT-4o-Audio.
-        1. Prints to console.
-        2. Broadcasts to WebSocket.
-        3. Updates GUI (Appending to feed).
+        Receives completed transcriptions from OpenAI Whisper.
+        This is pure speech-to-text, no AI interpretation.
         """
-        # 1. Console Output
-        print(delta, end="", flush=True)
+        # Single print statement (the only one now)
+        print(f"📝 {transcript}")
         
-        # 2. WebSocket Broadcast
+        # WebSocket Broadcast
         self.websocket_server.broadcast({
-            "type": "transcript_delta",
-            "source": "gpt-4o-audio",
-            "text": delta,
+            "type": "transcription",
+            "source": "whisper",
+            "text": transcript,
             "timestamp": time.time()
         })
         
-        # 3. GUI Update
+        # GUI Update
         if self.gui:
-             # Use `after` to be thread-safe with Tkinter
-            self.gui.root.after(0, lambda: self._append_transcript_to_gui(delta))
+            self.gui.root.after(0, lambda: self._append_transcript_to_gui(f"🎤 {transcript}\n\n"))
 
     def _append_transcript_to_gui(self, text):
-        """Appends streaming text to the GUI feed window."""
+        """Appends text to the GUI feed window."""
         self.gui.feed_text.configure(state=tk.NORMAL)
         self.gui.feed_text.insert(tk.END, text)
         self.gui.feed_text.see(tk.END)
@@ -151,7 +145,6 @@ class AppController:
         )
 
     def _start_stream_on_init(self):
-        # Check readiness instead of just region
         if not self.screen_capture.is_ready():
             self.gui.update_status("Cannot start. No source configured.", "red")
             print("ERROR: No Camera Index AND No Screen Region set.")

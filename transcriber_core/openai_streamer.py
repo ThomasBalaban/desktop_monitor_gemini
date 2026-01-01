@@ -12,7 +12,7 @@ class SmartAudioTranscriber:
         self.device_id = device_id
         self.input_rate = 16000     
         self.target_rate = 24000
-        self.queue = queue.Queue()
+        self.queue = queue.Queue(maxsize=200)
         self.running = False
         
         # Threads
@@ -23,6 +23,9 @@ class SmartAudioTranscriber:
         # Audio Settings
         self.gain = 5.0
         self.remove_dc = True
+        
+        # Streaming settings
+        self.chunk_duration_ms = 100  # 100ms chunks
 
     def start(self):
         self.running = True
@@ -30,11 +33,11 @@ class SmartAudioTranscriber:
         # 1. Create a dedicated Event Loop for Network I/O
         self.loop = asyncio.new_event_loop()
         
-        # 2. Start Network Thread (Runs the Async Loop)
+        # 2. Start Network Thread
         self.network_thread = threading.Thread(target=self._network_worker, args=(self.loop,), daemon=True)
         self.network_thread.start()
         
-        # 3. Start Audio Processing Thread (Blocking DSP)
+        # 3. Start Audio Processing Thread
         self.process_thread = threading.Thread(target=self._process_worker, daemon=True)
         self.process_thread.start()
 
@@ -43,90 +46,139 @@ class SmartAudioTranscriber:
         if self.loop:
             self.loop.call_soon_threadsafe(self.loop.stop)
         if self.process_thread:
-            self.process_thread.join()
+            self.process_thread.join(timeout=2)
         if self.network_thread:
-            self.network_thread.join()
+            self.network_thread.join(timeout=2)
 
     def _network_worker(self, loop):
         """Runs the asyncio loop forever in a background thread."""
         asyncio.set_event_loop(loop)
-        # Connect and keep the loop running
         loop.run_until_complete(self.client.connect())
         loop.run_forever()
 
     def _audio_callback(self, indata, frames, time_info, status):
-        if status:
-            print(f"[Audio Status]: {status}")
-        self.queue.put(indata.copy())
+        # Silently handle status - don't print warnings
+        try:
+            self.queue.put_nowait(indata.copy())
+        except queue.Full:
+            try:
+                self.queue.get_nowait()
+                self.queue.put_nowait(indata.copy())
+            except:
+                pass
 
     def _resample(self, audio_data, orig_sr, target_sr):
-        if orig_sr == target_sr: return audio_data
+        if orig_sr == target_sr: 
+            return audio_data
         num_samples = int(len(audio_data) * target_sr / orig_sr)
         return signal.resample(audio_data, num_samples)
 
     def _process_worker(self):
-        """Main Audio Processing Loop (DSP & Queue Consumption)."""
+        """Main Audio Processing Loop with auto-recovery."""
+        
+        # Query device info
         try:
             dev_info = sd.query_devices(self.device_id, 'input')
             self.input_rate = int(dev_info['default_samplerate'])
+            device_name = dev_info['name']
         except Exception as e:
             print(f"⚠️ Could not query device {self.device_id}: {e}")
             self.input_rate = 48000
+            device_name = f"Device {self.device_id}"
             
-        print(f"🎧 Capturing device {self.device_id} at {self.input_rate}Hz -> Resampling to {self.target_rate}Hz")
-        print(f"🎚️  Gain: {self.gain}x | DC Removal: {self.remove_dc}")
+        print(f"🎧 OpenAI Audio: {device_name}")
+        print(f"   Rate: {self.input_rate}Hz → {self.target_rate}Hz | Gain: {self.gain}x")
 
-        # Wait briefly for network to be ready
-        time.sleep(1)
+        # Wait for network connection
+        time.sleep(2.0)
+        
+        # Calculate samples per chunk
+        samples_per_chunk = int(self.input_rate * self.chunk_duration_ms / 1000)
+        
+        # Retry loop - if audio fails, try again
+        retry_count = 0
+        max_retries = 5
+        
+        while self.running and retry_count < max_retries:
+            try:
+                self._run_audio_stream(samples_per_chunk)
+            except sd.PortAudioError as e:
+                retry_count += 1
+                print(f"⚠️ Audio error (attempt {retry_count}/{max_retries}): {e}")
+                if retry_count < max_retries:
+                    print(f"   Retrying in 2 seconds...")
+                    time.sleep(2.0)
+            except Exception as e:
+                print(f"❌ Critical Audio Error: {e}")
+                import traceback
+                traceback.print_exc()
+                break
+        
+        if retry_count >= max_retries:
+            print(f"❌ Audio stream failed after {max_retries} attempts")
 
-        try:
-            with sd.InputStream(device=self.device_id, channels=1, 
-                                samplerate=self.input_rate, callback=self._audio_callback,
-                                dtype='int16'):
-                
-                print(f"✅ Audio Stream Active. Speak/Play Music now!")
-                last_print = time.time()
-                
-                while self.running:
+    def _run_audio_stream(self, samples_per_chunk):
+        """Run the actual audio stream - separated for retry logic."""
+        
+        with sd.InputStream(
+            device=self.device_id, 
+            channels=1, 
+            samplerate=self.input_rate, 
+            callback=self._audio_callback,
+            blocksize=samples_per_chunk,
+            dtype='int16',
+            latency='low'
+        ):
+            print(f"✅ OpenAI Audio Stream Active")
+            
+            audio_buffer = np.array([], dtype=np.int16)
+            send_interval = 0.1  # Send every 100ms
+            last_send = time.time()
+            
+            while self.running:
+                # Collect audio from queue
+                chunks_collected = 0
+                while not self.queue.empty() and chunks_collected < 20:
                     try:
-                        # 1. Collect Audio Chunk (~100ms)
-                        frames_needed = int(self.input_rate * 0.1)
-                        audio_buffer = []
-                        collected_frames = 0
-                        
-                        while collected_frames < frames_needed and self.running:
-                            try:
-                                data = self.queue.get(timeout=0.1)
-                                audio_buffer.append(data)
-                                collected_frames += len(data)
-                            except queue.Empty:
-                                break
-                        
-                        if not audio_buffer: continue
+                        data = self.queue.get_nowait()
+                        audio_buffer = np.concatenate([audio_buffer, data.flatten()])
+                        chunks_collected += 1
+                    except queue.Empty:
+                        break
+                
+                current_time = time.time()
+                
+                # Send audio at regular intervals
+                if current_time - last_send >= send_interval and len(audio_buffer) > 0:
+                    # Process all buffered audio
+                    chunk_to_send = audio_buffer
+                    audio_buffer = np.array([], dtype=np.int16)
+                    
+                    # --- DSP PIPELINE ---
+                    float_audio = chunk_to_send.astype(np.float32) / 32768.0
+                    
+                    if self.remove_dc:
+                        float_audio = float_audio - np.mean(float_audio)
+                    
+                    float_audio = float_audio * self.gain
+                    float_audio = np.clip(float_audio, -1.0, 1.0)
 
-                        full_chunk = np.concatenate(audio_buffer)
-                        
-                        # --- DSP PIPELINE ---
-                        float_audio = full_chunk.astype(np.float32) / 32768.0
-                        
-                        if self.remove_dc:
-                            float_audio = float_audio - np.mean(float_audio)
-                        
-                        float_audio = float_audio * self.gain
-                        float_audio = np.clip(float_audio, -1.0, 1.0)
-
-                        # --- RESAMPLE & SEND ---
-                        resampled = self._resample(float_audio, self.input_rate, self.target_rate)
-                        pcm_bytes = (resampled * 32767).astype(np.int16).tobytes()
-                        
-                        # Thread-safe send to the running network loop
-                        if self.loop and self.loop.is_running():
-                            asyncio.run_coroutine_threadsafe(
-                                self.client.send_audio_chunk(pcm_bytes), self.loop
-                            )
-                        
-                    except Exception as e:
-                        print(f"\nStreaming error: {e}")
-                        
-        except Exception as e:
-            print(f"\n❌ Critical Audio Error on Device {self.device_id}: {e}")
+                    # --- RESAMPLE & SEND ---
+                    resampled = self._resample(float_audio, self.input_rate, self.target_rate)
+                    pcm_bytes = (resampled * 32767).astype(np.int16).tobytes()
+                    
+                    # Send to OpenAI
+                    if self.loop and self.loop.is_running() and len(pcm_bytes) > 0:
+                        asyncio.run_coroutine_threadsafe(
+                            self.client.send_audio_chunk(pcm_bytes), self.loop
+                        )
+                    
+                    last_send = current_time
+                
+                # Prevent buffer overflow (max 5 seconds)
+                max_samples = self.input_rate * 5
+                if len(audio_buffer) > max_samples:
+                    audio_buffer = audio_buffer[-samples_per_chunk * 10:]
+                
+                # Small sleep
+                time.sleep(0.02)

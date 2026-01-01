@@ -2,8 +2,10 @@ import asyncio
 import time
 import threading
 from enum import Enum
-from audio_capture import AudioCapture
-from config import DESKTOP_AUDIO_DEVICE_ID, AUDIO_SAMPLE_RATE
+
+# Remove audio capture - OpenAI handles audio now
+# from audio_capture import AudioCapture
+# from config import DESKTOP_AUDIO_DEVICE_ID, AUDIO_SAMPLE_RATE
 
 class StreamingState(Enum):
     STOPPED = "stopped"
@@ -20,24 +22,25 @@ class StreamingManager:
         self.debug_mode = debug_mode
         self.state = StreamingState.STOPPED
         
-        # Audio Setup
-        self.audio_capture = AudioCapture(DESKTOP_AUDIO_DEVICE_ID, AUDIO_SAMPLE_RATE)
+        # DISABLED: Audio is now handled by OpenAI
+        # self.audio_capture = AudioCapture(DESKTOP_AUDIO_DEVICE_ID, AUDIO_SAMPLE_RATE)
+        self.audio_capture = None
         
         # Session Management
-        self.restart_interval = restart_interval # 1500s = 25 minutes
+        self.restart_interval = restart_interval
         self.session_start_time = None
         self.current_loop = None
         
-        # Pulse Logic (The Anti-Spam Fix)
+        # Pulse Logic
         self.last_pulse_time = 0
-        self.pulse_interval = 10.0 # Only speak every 10s if nothing is happening
+        self.pulse_interval = 10.0
         self.silence_threshold = 0.01
 
         # Manual Trigger Logic
         self.manual_trigger_text = None
         self.trigger_lock = threading.Lock()
         
-        # Transcript Injection (New)
+        # Transcript Injection
         self.transcript_buffer = []
         self.buffer_lock = threading.Lock()
         
@@ -73,7 +76,6 @@ class StreamingManager:
     def inject_transcript(self, text, source):
         """Called by AppController when local STT hears something."""
         with self.buffer_lock:
-            # Format: "[Microphone]: Hello Nami"
             self.transcript_buffer.append(f"[{source.capitalize()}]: {text}")
 
     def start_streaming(self):
@@ -82,8 +84,8 @@ class StreamingManager:
         self.state = StreamingState.CONNECTING
         self.session_start_time = time.time()
         
-        # Start Ears
-        self.audio_capture.start()
+        # DISABLED: Audio handled by OpenAI now
+        # self.audio_capture.start()
         
         def run_streaming():
             self.current_loop = asyncio.new_event_loop()
@@ -109,7 +111,7 @@ class StreamingManager:
         self.info_print("Stopping streaming...")
         self.state = StreamingState.STOPPED
         self.session_start_time = None
-        self.audio_capture.stop()
+        # DISABLED: self.audio_capture.stop()
         self._cleanup_async_tasks()
         self._update_status("Stopped", "red")
         return True
@@ -154,7 +156,7 @@ class StreamingManager:
                 if self.state == StreamingState.RESTARTING: return
                 
                 self.state = StreamingState.STREAMING
-                self._update_status("Watching (Silent Mode)", "green")
+                self._update_status("Watching (Vision Only)", "green")
                 
                 await asyncio.sleep(1.0) 
                 
@@ -189,36 +191,34 @@ class StreamingManager:
                         self.preview_callback(frame)
                     base64_image = self.screen_capture.image_to_base64(frame)
                 
-                # 2. Capture Audio
-                audio_bytes, is_loud = self.audio_capture.get_recent_audio()
+                # 2. DISABLED: Audio now handled by OpenAI
+                audio_bytes = None
+                is_loud = False
                 
-                # 3. Logic: Should we trigger a response (Turn Complete)?
+                # 3. Logic: Should we trigger a response?
                 turn_complete = False 
                 manual_text = None
                 
-                # Check Manual Trigger First
+                # Check Manual Trigger
                 with self.trigger_lock:
                     if self.manual_trigger_text:
                         manual_text = self.manual_trigger_text
                         turn_complete = True
-                        self.manual_trigger_text = None # consume it
-                        self.last_pulse_time = time.time() # Reset timer
+                        self.manual_trigger_text = None
+                        self.last_pulse_time = time.time()
                 
-                # --- NEW: Check for Local Transcripts ---
+                # Check for Local Transcripts
                 injected_text = None
                 with self.buffer_lock:
                     if self.transcript_buffer:
-                        # Combine all recent utterances into one context block
                         combined_speech = " ".join(self.transcript_buffer)
                         injected_text = f"CONTEXT UPDATE (What you just heard locally):\n{combined_speech}"
-                        self.transcript_buffer.clear() # Clear after reading
-                        
-                        # If we have speech, we force a turn complete so Gemini answers immediately
+                        self.transcript_buffer.clear()
                         turn_complete = True 
                         self.last_pulse_time = time.time()
                         if self.debug_mode: print(f"Trigger: Local Speech - {combined_speech}")
 
-                # Combine Manual and Injected text if both exist
+                # Combine text payloads
                 final_text_payload = manual_text 
                 if injected_text:
                     if final_text_payload:
@@ -226,26 +226,20 @@ class StreamingManager:
                     else:
                         final_text_payload = injected_text
 
-                # Check Audio/Heartbeat triggers (only if no explicit text trigger)
+                # Heartbeat pulse (vision only)
                 if not turn_complete:
                     current_time = time.time()
                     time_since_pulse = current_time - self.last_pulse_time
 
-                    if is_loud:
-                        turn_complete = True
-                        self.last_pulse_time = current_time
-                        if self.debug_mode: print("Trigger: Audio Detected")
-                        
-                    elif time_since_pulse > self.pulse_interval:
+                    if time_since_pulse > self.pulse_interval:
                         turn_complete = True
                         self.last_pulse_time = current_time
                         if self.debug_mode: print("Trigger: Heartbeat Pulse")
 
-                # 4. Send Data using the Hybrid Method
-                # FIX: Check if send was successful. If not, break the loop.
+                # 4. Send Data (Vision only, no audio)
                 send_success = await self.gemini_client.send_multimodal_frame(
                     base64_image, 
-                    audio_bytes, 
+                    None,  # No audio
                     turn_complete, 
                     text=final_text_payload
                 )
