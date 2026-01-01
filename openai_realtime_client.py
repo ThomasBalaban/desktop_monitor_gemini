@@ -5,7 +5,6 @@ import websockets
 import logging
 
 class OpenAIRealtimeClient:
-    # UPDATED MODEL NAME HERE vvv
     def __init__(self, api_key, model="gpt-4o-realtime-preview", 
                  on_text_delta=None, on_error=None):
         self.url = f"wss://api.openai.com/v1/realtime?model={model}"
@@ -27,7 +26,7 @@ class OpenAIRealtimeClient:
         try:
             self.websocket = await websockets.connect(self.url, extra_headers=headers)
             self.is_connected = True
-            print("✅ Connected to OpenAI Realtime API")
+            print(f"✅ Connected to OpenAI Realtime API ({self.url.split('model=')[1]})")
             
             asyncio.create_task(self._receive_loop())
             await self._update_session()
@@ -41,14 +40,15 @@ class OpenAIRealtimeClient:
             "type": "session.update",
             "session": {
                 "modalities": ["text"],
-                "temperature": 0.7,
+                "temperature": 0.6,
                 "instructions": (
                     "You are an expert theatrical transcriber. "
                     "TRANSCRIPTION RULES:\n"
-                    "1. ALWAYS output text if you hear human voices or singing.\n"
-                    "2. Identify speakers (e.g. 'Charlie:', 'Alastor:').\n"
-                    "3. Describe SFX in brackets [Like This].\n"
-                    "4. If lyrics are unclear, transcribe what you hear phonetically or describe the music style."
+                    "1. LANGUAGE: ENGLISH ONLY. Do not translate. If audio is unclear, write [Unclear].\n"
+                    "2. ALWAYS output text if you hear human voices or singing.\n"
+                    "3. Identify speakers (e.g. 'Charlie:', 'Alastor:').\n"
+                    "4. Describe SFX in brackets [Like This].\n"
+                    "5. If lyrics are unclear, transcribe what you hear phonetically or describe the music style."
                 ),
                 "input_audio_format": "pcm16",
                 "output_audio_format": "pcm16",
@@ -60,7 +60,7 @@ class OpenAIRealtimeClient:
                 }
             }
         }
-        print("📤 Sending Session Update...")
+        print("📤 Sending Session Update (Enforcing English)...")
         await self.websocket.send(json.dumps(session_update))
 
     async def send_audio_chunk(self, audio_bytes):
@@ -85,21 +85,11 @@ class OpenAIRealtimeClient:
                 
                 # --- EVENTS OF INTEREST ---
                 
-                # 1. Text Delta
                 if event_type == "response.text.delta":
                     delta = event.get("delta", "")
                     if self.on_text_delta:
                         self.on_text_delta(delta)
 
-                # 2. VAD Trigger
-                elif event_type == "input_audio_buffer.speech_started":
-                    print("🗣️  [VAD] Speech Detected...")
-                
-                # 3. Response Creation
-                elif event_type == "response.created":
-                    print("🤖 [AI] Thinking...")
-
-                # 4. Response Done
                 elif event_type == "response.done":
                     response = event.get("response", {})
                     status = response.get("status")
@@ -118,7 +108,9 @@ class OpenAIRealtimeClient:
                     elif status == "incomplete":
                          print(f"❌ [AI] Response INCOMPLETE. Reason: {response.get('status_details')}")
                     elif status == "failed":
-                         print(f"❌ [AI] Response FAILED. Error: {response.get('status_details')}")
+                         error_details = response.get('status_details', {})
+                         error_obj = error_details.get('error', {})
+                         print(f"❌ [AI] Response FAILED. Code: {error_obj.get('code')} | Msg: {error_obj.get('message')}")
                     else:
                         print(f"ℹ️ [AI] Response finished with status: {status}")
 

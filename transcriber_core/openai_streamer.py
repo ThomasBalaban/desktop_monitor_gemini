@@ -114,18 +114,6 @@ class SmartAudioTranscriber:
                         
                         float_audio = float_audio * self.gain
                         float_audio = np.clip(float_audio, -1.0, 1.0)
-                        
-                        # --- VISUALIZER ---
-                        if time.time() - last_print > 0.2:
-                            rms = np.sqrt(np.mean(float_audio**2))
-                            db = 20 * np.log10(rms + 1e-9)
-                            bar_len = int(max(0, (db + 60) / 2))
-                            bar = "█" * bar_len
-                            # Pad to prevent jitter
-                            bar = bar.ljust(30)
-                            # Use \r to overwrite line
-                            print(f"\r[Vol]: {db:.1f}dB |{bar}|", end="", flush=True)
-                            last_print = time.time()
 
                         # --- RESAMPLE & SEND ---
                         resampled = self._resample(float_audio, self.input_rate, self.target_rate)
