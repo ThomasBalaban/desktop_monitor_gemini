@@ -9,7 +9,7 @@ import base64
 class GeminiClient:
     def __init__(self, api_key, prompt, safety_settings=None, response_callback=None, error_callback=None, max_output_tokens=150, debug_mode=False, audio_sample_rate=16000):
         self.api_key = api_key
-        self.prompt = prompt
+        self.base_prompt = prompt  # This contains {audio_transcripts} placeholder
         self.safety_settings = safety_settings
         self.response_callback = response_callback
         self.error_callback = error_callback
@@ -44,9 +44,6 @@ class GeminiClient:
             return False, f"Connection test failed: {e}"
 
     async def connect(self):
-        """
-        Main connect method with Auto-Retry / Fallback logic.
-        """
         if self.connection_lock:
             async with self.connection_lock:
                 return await self._connect_with_fallback()
@@ -54,20 +51,19 @@ class GeminiClient:
             return await self._connect_with_fallback()
 
     async def _connect_with_fallback(self):
-        self.info_print("Attempt 1: Connecting with System Prompt in Setup...")
+        self.info_print("Connecting to Gemini...")
         success = await self._do_connect_attempt(use_system_instruction=True)
         
         if success:
             return True
             
-        self.info_print("⚠️ Attempt 1 failed. Retrying with Fallback Strategy...")
+        self.info_print("⚠️ First attempt failed. Retrying...")
         await asyncio.sleep(1)
         
-        self.info_print("Attempt 2: Connecting with Bare Setup...")
         success = await self._do_connect_attempt(use_system_instruction=False)
         
         if success:
-            self.info_print("✅ Fallback connection successful! Sending Prompt manually...")
+            self.info_print("✅ Fallback connection successful!")
             await self._send_initial_prompt_message()
             return True
             
@@ -77,7 +73,6 @@ class GeminiClient:
     async def _do_connect_attempt(self, use_system_instruction=True):
         await self._cleanup_connection()
         try:
-            # Use v1beta (Correct for Gemini 2.0)
             uri = f"wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key={self.api_key}"
             
             self.websocket = await asyncio.wait_for(
@@ -85,7 +80,9 @@ class GeminiClient:
                 timeout=15.0
             )
             
-            # Setup Message (camelCase for v1beta)
+            # For system instruction, use the base prompt WITHOUT audio (that comes per-message)
+            system_prompt = self.base_prompt.replace("{audio_transcripts}", "(Audio transcripts will be provided with each analysis request)")
+            
             setup_payload = {
                 "setup": {
                     "model": "models/gemini-2.0-flash-exp",
@@ -98,7 +95,7 @@ class GeminiClient:
             
             if use_system_instruction:
                 setup_payload["setup"]["systemInstruction"] = {
-                    "parts": [{"text": self.prompt}]
+                    "parts": [{"text": system_prompt}]
                 }
             
             await self.websocket.send(json.dumps(setup_payload))
@@ -127,11 +124,12 @@ class GeminiClient:
     async def _send_initial_prompt_message(self):
         if not self.is_connected: return
         try:
+            system_prompt = self.base_prompt.replace("{audio_transcripts}", "(Audio transcripts will be provided with each analysis request)")
             msg = {
                 "clientContent": {
                     "turns": [{
                         "role": "user",
-                        "parts": [{"text": f"SYSTEM INSTRUCTIONS: {self.prompt}"}]
+                        "parts": [{"text": f"SYSTEM INSTRUCTIONS: {system_prompt}"}]
                     }],
                     "turnComplete": False
                 }
@@ -142,35 +140,23 @@ class GeminiClient:
 
     async def send_multimodal_frame(self, base64_image, audio_bytes=None, turn_complete=False, text=None):
         """
-        Hybrid Approach (Fixed for 1007 Error):
-        - Audio -> realtimeInput (Streaming Context)
-        - Video -> clientContent (Inline Data)
-        - Text -> clientContent (User Prompt)
+        Sends frame to Gemini.
+        - base64_image: The video frame
+        - audio_bytes: Not used anymore (we use text transcripts instead)
+        - turn_complete: If True, Gemini should respond
+        - text: The audio transcripts text to include
         """
         if not self.is_connected or not self.websocket:
             return False
 
         try:
-            # 1. AUDIO: Send via realtimeInput (Efficient Streaming)
-            if audio_bytes:
-                base64_audio = base64.b64encode(audio_bytes).decode('utf-8')
-                audio_msg = {
-                    "realtimeInput": {
-                        "mediaChunks": [{
-                            "mimeType": f"audio/pcm;rate={self.audio_sample_rate}",
-                            "data": base64_audio
-                        }]
-                    }
-                }
-                await self.websocket.send(json.dumps(audio_msg))
-
-            # 2. VIDEO & TEXT: Send via clientContent
-            # We must send video here because realtimeInput rejects JPEGs (Error 1007)
             parts = []
             
+            # Add audio transcripts as text context
             if text:
                 parts.append({"text": text})
 
+            # Add video frame
             if base64_image:
                 parts.append({
                     "inlineData": {

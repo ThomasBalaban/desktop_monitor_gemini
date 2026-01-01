@@ -22,7 +22,7 @@ class OpenAIRealtimeClient:
         self._audio_bytes_sent = 0
         self._last_commit_time = 0
         self._commit_task = None
-        self._min_audio_for_commit = 24000 * 2 * 0.15  # 150ms of audio at 24kHz, 16-bit (2 bytes per sample)
+        self._min_audio_for_commit = 24000 * 2 * 0.15  # 150ms of audio at 24kHz, 16-bit
         
     async def connect(self):
         headers = {
@@ -50,14 +50,12 @@ class OpenAIRealtimeClient:
         session_update = {
             "type": "session.update",
             "session": {
-                # Enable Whisper transcription
                 "input_audio_transcription": {
                     "model": "whisper-1"
                 },
                 "modalities": ["text"],
                 "input_audio_format": "pcm16",
                 "output_audio_format": "pcm16",
-                # Disable VAD - we manually commit
                 "turn_detection": None
             }
         }
@@ -68,21 +66,18 @@ class OpenAIRealtimeClient:
         """Periodically commit audio buffer to force transcription."""
         while self.is_connected:
             try:
-                await asyncio.sleep(3.0)  # Check every 3 seconds
+                await asyncio.sleep(3.0)
                 
-                # Only commit if we have enough audio buffered
                 if self._audio_bytes_sent >= self._min_audio_for_commit:
                     if self.is_connected and self.websocket:
                         commit_event = {"type": "input_audio_buffer.commit"}
                         await self.websocket.send(json.dumps(commit_event))
-                        # Reset counter after commit
                         self._audio_bytes_sent = 0
                         self._last_commit_time = time.time()
                         
             except asyncio.CancelledError:
                 break
-            except Exception as e:
-                # Don't spam errors - just silently retry
+            except Exception:
                 pass
 
     async def send_audio_chunk(self, audio_bytes):
@@ -96,7 +91,6 @@ class OpenAIRealtimeClient:
         }
         try:
             await self.websocket.send(json.dumps(event))
-            # Track how much audio we've sent since last commit
             self._audio_bytes_sent += len(audio_bytes)
         except Exception as e:
             print(f"Error sending audio: {e}")
@@ -107,8 +101,6 @@ class OpenAIRealtimeClient:
                 event = json.loads(message)
                 event_type = event.get("type", "unknown")
                 
-                # ========== TRANSCRIPTION EVENTS ==========
-                
                 if event_type == "conversation.item.input_audio_transcription.completed":
                     transcript = event.get("transcript", "").strip()
                     if transcript and self.on_transcript:
@@ -117,28 +109,17 @@ class OpenAIRealtimeClient:
                 elif event_type == "conversation.item.input_audio_transcription.failed":
                     error = event.get("error", {})
                     error_msg = error.get("message", "Unknown transcription error")
-                    # Only print if it's not a "buffer too small" error
                     if "buffer too small" not in error_msg.lower():
                         print(f"⚠️ Transcription failed: {error_msg}")
-                
-                # ========== BUFFER EVENTS ==========
-                
-                elif event_type == "input_audio_buffer.committed":
-                    pass  # Successfully committed
                 
                 elif event_type == "input_audio_buffer.cleared":
                     self._audio_bytes_sent = 0
                 
-                # ========== ERROR EVENTS ==========
-                
                 elif event_type == "error":
                     error_msg = event.get("error", {}).get("message", "Unknown error")
-                    # Filter out buffer too small errors - these are expected sometimes
                     if "buffer too small" not in error_msg.lower():
                         print(f"❌ OpenAI Error: {error_msg}")
                         if self.on_error: self.on_error(error_msg)
-                
-                # ========== SESSION EVENTS ==========
                 
                 elif event_type == "session.created":
                     print("📡 Session created")

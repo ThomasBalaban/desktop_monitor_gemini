@@ -15,13 +15,11 @@ from websocket_server import WebSocketServer, WEBSOCKET_PORT
 from openai_realtime_client import OpenAIRealtimeClient
 from transcriber_core.openai_streamer import SmartAudioTranscriber
 
-# Transcript enrichment
-from transcript_enricher import TranscriptEnricher
 
 class AppController:
     def __init__(self):
         self.config = ConfigLoader()
-        print("Gemini Screen Watcher + OpenAI Audio - Starting up...")
+        print("Gemini Screen Watcher (Unified Vision+Audio) - Starting up...")
         
         # 1. Initialize Screen Capture
         self.screen_capture = ScreenCapture(
@@ -29,7 +27,7 @@ class AppController:
             video_index=self.config.video_device_index
         )
         
-        # 2. Initialize Gemini Client (for visual analysis)
+        # 2. Initialize Gemini Client (handles both vision AND audio interpretation)
         self.gemini_client = GeminiClient(
             self.config.api_key, 
             self.config.prompt, 
@@ -41,7 +39,7 @@ class AppController:
             audio_sample_rate=self.config.audio_sample_rate
         )
 
-        # 3. Initialize Streaming Manager (vision only)
+        # 3. Initialize Streaming Manager (sends frames + buffered transcripts to Gemini)
         self.streaming_manager = StreamingManager(
             self.screen_capture, self.gemini_client, self.config.fps,
             restart_interval=1500, debug_mode=self.config.debug_mode
@@ -57,31 +55,18 @@ class AppController:
         # 5. Initialize GUI
         self.gui = AppGUI(self)
         
-        # 6. Store latest visual context for enrichment
-        self.latest_visual_context = ""
-        
-        # 7. Initialize OpenAI Realtime + Enricher
+        # 6. Initialize OpenAI Realtime (Whisper for transcription only)
         if not self.config.is_openai_key_configured():
             print("⚠️ WARNING: OPENAI_API_KEY not configured. Audio transcription will not work.")
             self.gui.add_error("OPENAI_API_KEY missing in api_keys.py")
             self.openai_client = None
             self.smart_transcriber = None
-            self.enricher = None
         else:
-            # Transcript Enricher (GPT-4o post-processing)
-            self.enricher = TranscriptEnricher(
-                api_key=self.config.openai_api_key,
-                on_enriched_transcript=self._handle_enriched_transcript
-            )
-            
-            # OpenAI Realtime (Whisper transcription)
             self.openai_client = OpenAIRealtimeClient(
                 api_key=self.config.openai_api_key,
-                on_transcript=self._handle_raw_transcription,
+                on_transcript=self._handle_whisper_transcript,
                 on_error=self._on_openai_error
             )
-            
-            # Audio streamer
             self.smart_transcriber = SmartAudioTranscriber(
                 self.openai_client, 
                 device_id=self.config.audio_device_id
@@ -99,13 +84,9 @@ class AppController:
             self.gui.update_preview(frame)
 
     def run(self):
-        # Start Enricher
-        if self.enricher:
-            self.enricher.start()
-        
-        # Start Audio Transcription
+        # Start Audio Transcription (Whisper)
         if self.smart_transcriber:
-            print(f"🎙️ Starting OpenAI Realtime Audio on Device {self.config.audio_device_id}...")
+            print(f"🎙️ Starting OpenAI Whisper on Device {self.config.audio_device_id}...")
             self.smart_transcriber.start()
         
         if not self.config.is_api_key_configured():
@@ -118,67 +99,70 @@ class AppController:
             self.gui.run()
         finally:
             print("Shutting down services...")
-            if self.enricher:
-                self.enricher.stop()
             if self.smart_transcriber:
                 self.smart_transcriber.stop()
             self.streaming_manager.stop_streaming()
 
-    # --- Transcription Pipeline ---
+    # --- Whisper Transcript Handling ---
     
-    def _handle_raw_transcription(self, transcript):
+    def _handle_whisper_transcript(self, transcript):
         """
         Receives raw Whisper transcription.
-        Passes it to the enricher for formatting.
+        Buffers it for Gemini to process with the next pulse.
         """
-        print(f"🎤 Raw: {transcript}")
+        print(f"🎤 [Whisper]: {transcript}")
         
-        # Update enricher with latest visual context
-        if self.enricher:
-            self.enricher.update_visual_context(self.latest_visual_context)
-            self.enricher.enrich(transcript)
-        else:
-            # No enricher, just display raw
-            self._display_transcript(f"🎤 {transcript}")
-    
-    def _handle_enriched_transcript(self, enriched_text):
-        """
-        Receives enriched transcript from GPT-4o.
-        Displays it in GUI and broadcasts via WebSocket.
-        """
-        print(f"🎭 {enriched_text}")
-        self._display_transcript(enriched_text)
+        # Add to streaming manager's buffer (will be sent to Gemini on next pulse)
+        self.streaming_manager.add_transcript(transcript)
         
-        # WebSocket Broadcast
+        # Also broadcast raw transcript via WebSocket (in case downstream wants it)
         self.websocket_server.broadcast({
-            "type": "enriched_transcript",
-            "text": enriched_text,
+            "type": "raw_transcript",
+            "source": "whisper",
+            "text": transcript,
             "timestamp": time.time()
         })
-    
-    def _display_transcript(self, text):
-        """Display transcript in GUI."""
-        if self.gui:
-            self.gui.root.after(0, lambda: self._append_to_gui(f"{text}\n"))
-
-    def _append_to_gui(self, text):
-        """Appends text to the GUI feed window."""
-        self.gui.feed_text.configure(state=tk.NORMAL)
-        self.gui.feed_text.insert(tk.END, text)
-        self.gui.feed_text.see(tk.END)
-        self.gui.feed_text.configure(state=tk.DISABLED)
 
     def _on_openai_error(self, error_msg):
         print(f"❌ OpenAI Error: {error_msg}")
         self.gui.add_error(f"OpenAI Error: {error_msg}")
 
-    # --- Gemini Visual Analysis ---
+    # --- Gemini Response Handling ---
+
+    def _on_gemini_response(self, text_chunk):
+        """Handle Gemini's unified vision+audio analysis response."""
+        self.current_response_buffer += text_chunk
+        
+        # Wait for complete sentences
+        if self.current_response_buffer.strip().endswith(('.', '!', '?', '"', '\n')):
+            final_text = self.current_response_buffer.strip()
+            
+            # Display in GUI
+            self.gui.add_response(final_text)
+            print(f"🎭 [SCREEN]: {final_text}")
+            
+            # Broadcast unified analysis via WebSocket
+            self.websocket_server.broadcast({
+                "type": "screen_analysis",
+                "timestamp": datetime.now().isoformat(),
+                "content": final_text
+            })
+            
+            self.current_response_buffer = ""
+
+    def _on_gemini_error(self, error_message):
+        self.gui.add_error(f"Gemini API Error: {error_message}")
+
+    def _on_streaming_error(self, error_message):
+        self.gui.add_error(f"Streaming Error: {error_message}")
+
+    # --- Other Methods ---
 
     def request_analysis(self):
         print("Manual analysis triggered.")
         self.gui.update_status("Requesting Analysis...", "cyan")
         self.streaming_manager.trigger_manual_analysis(
-            "Analyze the audio and video from the last 5 seconds. Describe exactly what happened."
+            "Describe exactly what is happening on screen right now, including any audio/dialogue."
         )
 
     def _start_stream_on_init(self):
@@ -218,33 +202,6 @@ class AppController:
             print(f"Using capture region from config: {self.config.get_region_description()}")
         else:
             print("No capture region set (will rely on GUI if not using camera)")
-
-    def _on_gemini_response(self, text_chunk):
-        """Handle Gemini's visual analysis response."""
-        self.current_response_buffer += text_chunk
-        if self.current_response_buffer.strip().endswith(('.', '!', '?', '\n')):
-            final_text = self.current_response_buffer.strip()
-            
-            # Store as visual context for transcript enrichment
-            self.latest_visual_context = final_text
-            
-            # Display in GUI
-            self.gui.add_response(final_text)
-            
-            # Broadcast
-            response_data = {
-                "type": "visual_analysis",
-                "timestamp": datetime.now().isoformat(),
-                "content": final_text
-            }
-            self.websocket_server.broadcast(response_data)
-            self.current_response_buffer = ""
-
-    def _on_gemini_error(self, error_message):
-        self.gui.add_error(f"Gemini API Error: {error_message}")
-
-    def _on_streaming_error(self, error_message):
-        self.gui.add_error(f"Streaming Error: {error_message}")
 
     def get_prompt(self):
         return self.config.prompt

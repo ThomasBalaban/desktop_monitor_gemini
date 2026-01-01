@@ -25,19 +25,16 @@ class SmartAudioTranscriber:
         self.remove_dc = True
         
         # Streaming settings
-        self.chunk_duration_ms = 100  # 100ms chunks
+        self.chunk_duration_ms = 100
 
     def start(self):
         self.running = True
         
-        # 1. Create a dedicated Event Loop for Network I/O
         self.loop = asyncio.new_event_loop()
         
-        # 2. Start Network Thread
         self.network_thread = threading.Thread(target=self._network_worker, args=(self.loop,), daemon=True)
         self.network_thread.start()
         
-        # 3. Start Audio Processing Thread
         self.process_thread = threading.Thread(target=self._process_worker, daemon=True)
         self.process_thread.start()
 
@@ -51,13 +48,11 @@ class SmartAudioTranscriber:
             self.network_thread.join(timeout=2)
 
     def _network_worker(self, loop):
-        """Runs the asyncio loop forever in a background thread."""
         asyncio.set_event_loop(loop)
         loop.run_until_complete(self.client.connect())
         loop.run_forever()
 
     def _audio_callback(self, indata, frames, time_info, status):
-        # Silently handle status - don't print warnings
         try:
             self.queue.put_nowait(indata.copy())
         except queue.Full:
@@ -74,9 +69,6 @@ class SmartAudioTranscriber:
         return signal.resample(audio_data, num_samples)
 
     def _process_worker(self):
-        """Main Audio Processing Loop with auto-recovery."""
-        
-        # Query device info
         try:
             dev_info = sd.query_devices(self.device_id, 'input')
             self.input_rate = int(dev_info['default_samplerate'])
@@ -89,13 +81,10 @@ class SmartAudioTranscriber:
         print(f"🎧 OpenAI Audio: {device_name}")
         print(f"   Rate: {self.input_rate}Hz → {self.target_rate}Hz | Gain: {self.gain}x")
 
-        # Wait for network connection
         time.sleep(2.0)
         
-        # Calculate samples per chunk
         samples_per_chunk = int(self.input_rate * self.chunk_duration_ms / 1000)
         
-        # Retry loop - if audio fails, try again
         retry_count = 0
         max_retries = 5
         
@@ -118,8 +107,6 @@ class SmartAudioTranscriber:
             print(f"❌ Audio stream failed after {max_retries} attempts")
 
     def _run_audio_stream(self, samples_per_chunk):
-        """Run the actual audio stream - separated for retry logic."""
-        
         with sd.InputStream(
             device=self.device_id, 
             channels=1, 
@@ -132,11 +119,10 @@ class SmartAudioTranscriber:
             print(f"✅ OpenAI Audio Stream Active")
             
             audio_buffer = np.array([], dtype=np.int16)
-            send_interval = 0.1  # Send every 100ms
+            send_interval = 0.1
             last_send = time.time()
             
             while self.running:
-                # Collect audio from queue
                 chunks_collected = 0
                 while not self.queue.empty() and chunks_collected < 20:
                     try:
@@ -148,13 +134,10 @@ class SmartAudioTranscriber:
                 
                 current_time = time.time()
                 
-                # Send audio at regular intervals
                 if current_time - last_send >= send_interval and len(audio_buffer) > 0:
-                    # Process all buffered audio
                     chunk_to_send = audio_buffer
                     audio_buffer = np.array([], dtype=np.int16)
                     
-                    # --- DSP PIPELINE ---
                     float_audio = chunk_to_send.astype(np.float32) / 32768.0
                     
                     if self.remove_dc:
@@ -163,11 +146,9 @@ class SmartAudioTranscriber:
                     float_audio = float_audio * self.gain
                     float_audio = np.clip(float_audio, -1.0, 1.0)
 
-                    # --- RESAMPLE & SEND ---
                     resampled = self._resample(float_audio, self.input_rate, self.target_rate)
                     pcm_bytes = (resampled * 32767).astype(np.int16).tobytes()
                     
-                    # Send to OpenAI
                     if self.loop and self.loop.is_running() and len(pcm_bytes) > 0:
                         asyncio.run_coroutine_threadsafe(
                             self.client.send_audio_chunk(pcm_bytes), self.loop
@@ -175,10 +156,8 @@ class SmartAudioTranscriber:
                     
                     last_send = current_time
                 
-                # Prevent buffer overflow (max 5 seconds)
                 max_samples = self.input_rate * 5
                 if len(audio_buffer) > max_samples:
                     audio_buffer = audio_buffer[-samples_per_chunk * 10:]
                 
-                # Small sleep
                 time.sleep(0.02)

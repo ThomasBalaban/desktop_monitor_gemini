@@ -2,10 +2,7 @@ import asyncio
 import time
 import threading
 from enum import Enum
-
-# Remove audio capture - OpenAI handles audio now
-# from audio_capture import AudioCapture
-# from config import DESKTOP_AUDIO_DEVICE_ID, AUDIO_SAMPLE_RATE
+from config import PULSE_INTERVAL
 
 class StreamingState(Enum):
     STOPPED = "stopped"
@@ -22,25 +19,20 @@ class StreamingManager:
         self.debug_mode = debug_mode
         self.state = StreamingState.STOPPED
         
-        # DISABLED: Audio is now handled by OpenAI
-        # self.audio_capture = AudioCapture(DESKTOP_AUDIO_DEVICE_ID, AUDIO_SAMPLE_RATE)
-        self.audio_capture = None
-        
         # Session Management
         self.restart_interval = restart_interval
         self.session_start_time = None
         self.current_loop = None
         
-        # Pulse Logic
+        # Pulse Logic - now 4 seconds
         self.last_pulse_time = 0
-        self.pulse_interval = 10.0
-        self.silence_threshold = 0.01
+        self.pulse_interval = PULSE_INTERVAL
 
         # Manual Trigger Logic
         self.manual_trigger_text = None
         self.trigger_lock = threading.Lock()
         
-        # Transcript Injection
+        # Audio Transcript Buffer (NEW - collects Whisper transcripts)
         self.transcript_buffer = []
         self.buffer_lock = threading.Lock()
         
@@ -73,19 +65,25 @@ class StreamingManager:
             self.manual_trigger_text = text
         self.info_print(f"Manual analysis queued: {text}")
 
-    def inject_transcript(self, text, source):
-        """Called by AppController when local STT hears something."""
+    def add_transcript(self, transcript):
+        """Add a Whisper transcript to the buffer (called from app_controller)."""
         with self.buffer_lock:
-            self.transcript_buffer.append(f"[{source.capitalize()}]: {text}")
+            self.transcript_buffer.append(transcript)
+            if self.debug_mode:
+                print(f"[Buffer] Added transcript: {transcript[:50]}...")
+
+    def get_and_clear_transcripts(self):
+        """Get all buffered transcripts and clear the buffer."""
+        with self.buffer_lock:
+            transcripts = self.transcript_buffer.copy()
+            self.transcript_buffer.clear()
+            return transcripts
 
     def start_streaming(self):
         if self.state != StreamingState.STOPPED:
             return False
         self.state = StreamingState.CONNECTING
         self.session_start_time = time.time()
-        
-        # DISABLED: Audio handled by OpenAI now
-        # self.audio_capture.start()
         
         def run_streaming():
             self.current_loop = asyncio.new_event_loop()
@@ -111,7 +109,6 @@ class StreamingManager:
         self.info_print("Stopping streaming...")
         self.state = StreamingState.STOPPED
         self.session_start_time = None
-        # DISABLED: self.audio_capture.stop()
         self._cleanup_async_tasks()
         self._update_status("Stopped", "red")
         return True
@@ -156,7 +153,7 @@ class StreamingManager:
                 if self.state == StreamingState.RESTARTING: return
                 
                 self.state = StreamingState.STREAMING
-                self._update_status("Watching (Vision Only)", "green")
+                self._update_status("Watching (4s pulse)", "green")
                 
                 await asyncio.sleep(1.0) 
                 
@@ -183,7 +180,7 @@ class StreamingManager:
         while self.state == StreamingState.STREAMING:
             start_time = time.time()
             try:
-                # 1. Capture & Send Screen (Always)
+                # 1. Capture frame (always - feeds Gemini's visual buffer)
                 frame = self.screen_capture.capture_frame()
                 base64_image = None
                 if frame:
@@ -191,57 +188,41 @@ class StreamingManager:
                         self.preview_callback(frame)
                     base64_image = self.screen_capture.image_to_base64(frame)
                 
-                # 2. DISABLED: Audio now handled by OpenAI
-                audio_bytes = None
-                is_loud = False
-                
-                # 3. Logic: Should we trigger a response?
+                # 2. Check if it's time for a pulse (every 4 seconds)
                 turn_complete = False 
-                manual_text = None
+                combined_text = None
+                current_time = time.time()
+                time_since_pulse = current_time - self.last_pulse_time
                 
                 # Check Manual Trigger
                 with self.trigger_lock:
                     if self.manual_trigger_text:
-                        manual_text = self.manual_trigger_text
+                        combined_text = self.manual_trigger_text
                         turn_complete = True
                         self.manual_trigger_text = None
-                        self.last_pulse_time = time.time()
-                
-                # Check for Local Transcripts
-                injected_text = None
-                with self.buffer_lock:
-                    if self.transcript_buffer:
-                        combined_speech = " ".join(self.transcript_buffer)
-                        injected_text = f"CONTEXT UPDATE (What you just heard locally):\n{combined_speech}"
-                        self.transcript_buffer.clear()
-                        turn_complete = True 
-                        self.last_pulse_time = time.time()
-                        if self.debug_mode: print(f"Trigger: Local Speech - {combined_speech}")
-
-                # Combine text payloads
-                final_text_payload = manual_text 
-                if injected_text:
-                    if final_text_payload:
-                        final_text_payload += f"\n\n{injected_text}"
-                    else:
-                        final_text_payload = injected_text
-
-                # Heartbeat pulse (vision only)
-                if not turn_complete:
-                    current_time = time.time()
-                    time_since_pulse = current_time - self.last_pulse_time
-
-                    if time_since_pulse > self.pulse_interval:
-                        turn_complete = True
                         self.last_pulse_time = current_time
-                        if self.debug_mode: print("Trigger: Heartbeat Pulse")
 
-                # 4. Send Data (Vision only, no audio)
+                # Regular pulse every 4 seconds
+                if not turn_complete and time_since_pulse >= self.pulse_interval:
+                    turn_complete = True
+                    self.last_pulse_time = current_time
+                    
+                    # Get buffered transcripts
+                    transcripts = self.get_and_clear_transcripts()
+                    if transcripts:
+                        combined_text = "AUDIO FROM LAST 4 SECONDS:\n" + "\n".join(f"- {t}" for t in transcripts)
+                    else:
+                        combined_text = "AUDIO FROM LAST 4 SECONDS:\n(No speech detected)"
+                    
+                    if self.debug_mode:
+                        print(f"[Pulse] Sending {len(transcripts)} transcripts to Gemini")
+
+                # 3. Send to Gemini
                 send_success = await self.gemini_client.send_multimodal_frame(
                     base64_image, 
-                    None,  # No audio
+                    None,  # No raw audio - using transcripts instead
                     turn_complete, 
-                    text=final_text_payload
+                    text=combined_text
                 )
 
                 if not send_success:
@@ -249,7 +230,7 @@ class StreamingManager:
                     self.state = StreamingState.ERROR
                     break
                 
-                # 5. Session Time Limit Check
+                # 4. Session Time Limit Check
                 if self.session_start_time and (time.time() - self.session_start_time) >= self.restart_interval:
                     self.info_print("Session time limit reached. Initiating restart.")
                     threading.Thread(target=self.restart_streaming_session, daemon=True).start()
