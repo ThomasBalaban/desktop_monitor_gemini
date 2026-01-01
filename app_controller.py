@@ -11,22 +11,25 @@ from streaming_manager import StreamingManager
 from app_gui import AppGUI
 from websocket_server import WebSocketServer, WEBSOCKET_PORT
 
-# --- IMPORTS FOR OPENAI REALTIME ---
+# OpenAI Realtime imports
 from openai_realtime_client import OpenAIRealtimeClient
 from transcriber_core.openai_streamer import SmartAudioTranscriber
+
+# Transcript enrichment
+from transcript_enricher import TranscriptEnricher
 
 class AppController:
     def __init__(self):
         self.config = ConfigLoader()
         print("Gemini Screen Watcher + OpenAI Audio - Starting up...")
         
-        # 1. Initialize Screen Capture (Kept for Gemini Vision)
+        # 1. Initialize Screen Capture
         self.screen_capture = ScreenCapture(
             self.config.image_quality, 
             video_index=self.config.video_device_index
         )
         
-        # 2. Initialize Gemini Client (Kept for Visual Analysis)
+        # 2. Initialize Gemini Client (for visual analysis)
         self.gemini_client = GeminiClient(
             self.config.api_key, 
             self.config.prompt, 
@@ -38,7 +41,7 @@ class AppController:
             audio_sample_rate=self.config.audio_sample_rate
         )
 
-        # 3. Initialize Streaming Manager (Manages Gemini Vision Stream)
+        # 3. Initialize Streaming Manager (vision only)
         self.streaming_manager = StreamingManager(
             self.screen_capture, self.gemini_client, self.config.fps,
             restart_interval=1500, debug_mode=self.config.debug_mode
@@ -54,18 +57,31 @@ class AppController:
         # 5. Initialize GUI
         self.gui = AppGUI(self)
         
-        # --- Initialize OpenAI Realtime (Transcription Only) ---
+        # 6. Store latest visual context for enrichment
+        self.latest_visual_context = ""
+        
+        # 7. Initialize OpenAI Realtime + Enricher
         if not self.config.is_openai_key_configured():
             print("⚠️ WARNING: OPENAI_API_KEY not configured. Audio transcription will not work.")
             self.gui.add_error("OPENAI_API_KEY missing in api_keys.py")
             self.openai_client = None
             self.smart_transcriber = None
+            self.enricher = None
         else:
+            # Transcript Enricher (GPT-4o post-processing)
+            self.enricher = TranscriptEnricher(
+                api_key=self.config.openai_api_key,
+                on_enriched_transcript=self._handle_enriched_transcript
+            )
+            
+            # OpenAI Realtime (Whisper transcription)
             self.openai_client = OpenAIRealtimeClient(
                 api_key=self.config.openai_api_key,
-                on_transcript=self._handle_transcription,  # Only callback needed now
+                on_transcript=self._handle_raw_transcription,
                 on_error=self._on_openai_error
             )
+            
+            # Audio streamer
             self.smart_transcriber = SmartAudioTranscriber(
                 self.openai_client, 
                 device_id=self.config.audio_device_id
@@ -75,7 +91,7 @@ class AppController:
         if self.config.video_device_index is None:
             self._initialize_capture_region()
             
-        # Delay stream start slightly to allow UI to load
+        # Delay stream start
         self.gui.root.after(2000, self._start_stream_on_init)
 
     def gui_update_wrapper(self, frame):
@@ -83,9 +99,13 @@ class AppController:
             self.gui.update_preview(frame)
 
     def run(self):
+        # Start Enricher
+        if self.enricher:
+            self.enricher.start()
+        
         # Start Audio Transcription
         if self.smart_transcriber:
-            print(f"🎙️ Starting OpenAI Realtime Audio Stream on Device {self.config.audio_device_id}...")
+            print(f"🎙️ Starting OpenAI Realtime Audio on Device {self.config.audio_device_id}...")
             self.smart_transcriber.start()
         
         if not self.config.is_api_key_configured():
@@ -98,33 +118,50 @@ class AppController:
             self.gui.run()
         finally:
             print("Shutting down services...")
+            if self.enricher:
+                self.enricher.stop()
             if self.smart_transcriber:
                 self.smart_transcriber.stop()
             self.streaming_manager.stop_streaming()
 
-    # --- OpenAI Transcription Callback ---
+    # --- Transcription Pipeline ---
     
-    def _handle_transcription(self, transcript):
+    def _handle_raw_transcription(self, transcript):
         """
-        Receives completed transcriptions from OpenAI Whisper.
-        This is pure speech-to-text, no AI interpretation.
+        Receives raw Whisper transcription.
+        Passes it to the enricher for formatting.
         """
-        # Single print statement (the only one now)
-        print(f"📝 {transcript}")
+        print(f"🎤 Raw: {transcript}")
+        
+        # Update enricher with latest visual context
+        if self.enricher:
+            self.enricher.update_visual_context(self.latest_visual_context)
+            self.enricher.enrich(transcript)
+        else:
+            # No enricher, just display raw
+            self._display_transcript(f"🎤 {transcript}")
+    
+    def _handle_enriched_transcript(self, enriched_text):
+        """
+        Receives enriched transcript from GPT-4o.
+        Displays it in GUI and broadcasts via WebSocket.
+        """
+        print(f"🎭 {enriched_text}")
+        self._display_transcript(enriched_text)
         
         # WebSocket Broadcast
         self.websocket_server.broadcast({
-            "type": "transcription",
-            "source": "whisper",
-            "text": transcript,
+            "type": "enriched_transcript",
+            "text": enriched_text,
             "timestamp": time.time()
         })
-        
-        # GUI Update
+    
+    def _display_transcript(self, text):
+        """Display transcript in GUI."""
         if self.gui:
-            self.gui.root.after(0, lambda: self._append_transcript_to_gui(f"🎤 {transcript}\n\n"))
+            self.gui.root.after(0, lambda: self._append_to_gui(f"{text}\n"))
 
-    def _append_transcript_to_gui(self, text):
+    def _append_to_gui(self, text):
         """Appends text to the GUI feed window."""
         self.gui.feed_text.configure(state=tk.NORMAL)
         self.gui.feed_text.insert(tk.END, text)
@@ -135,7 +172,7 @@ class AppController:
         print(f"❌ OpenAI Error: {error_msg}")
         self.gui.add_error(f"OpenAI Error: {error_msg}")
 
-    # --- Existing Functionality ---
+    # --- Gemini Visual Analysis ---
 
     def request_analysis(self):
         print("Manual analysis triggered.")
@@ -183,12 +220,20 @@ class AppController:
             print("No capture region set (will rely on GUI if not using camera)")
 
     def _on_gemini_response(self, text_chunk):
+        """Handle Gemini's visual analysis response."""
         self.current_response_buffer += text_chunk
         if self.current_response_buffer.strip().endswith(('.', '!', '?', '\n')):
             final_text = self.current_response_buffer.strip()
+            
+            # Store as visual context for transcript enrichment
+            self.latest_visual_context = final_text
+            
+            # Display in GUI
             self.gui.add_response(final_text)
+            
+            # Broadcast
             response_data = {
-                "type": "text_update",
+                "type": "visual_analysis",
                 "timestamp": datetime.now().isoformat(),
                 "content": final_text
             }
