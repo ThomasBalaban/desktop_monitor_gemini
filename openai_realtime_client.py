@@ -117,14 +117,14 @@ class OpenAIRealtimeClient:
                 print(f"❌ OpenAI API Error [{err_code}]: {err_msg}")
                 self.on_error(f"API Error: {err_msg}")
                 
-            elif event_type == "input_audio_buffer.speech_started":
-                print("🎤 Speech detected")
+            # elif event_type == "input_audio_buffer.speech_started":
+                # print("🎤 Speech detected")
                 
-            elif event_type == "input_audio_buffer.speech_stopped":
-                print("🎤 Speech ended")
+            # elif event_type == "input_audio_buffer.speech_stopped":
+                # print("🎤 Speech ended")
                 
-            elif event_type == "input_audio_buffer.committed":
-                print("📝 Audio committed for transcription")
+            # elif event_type == "input_audio_buffer.committed":
+                # print("📝 Audio committed for transcription")
 
         except Exception as e:
             print(f"Message Parse Error: {e}")

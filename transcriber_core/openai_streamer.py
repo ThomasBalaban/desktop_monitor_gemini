@@ -219,7 +219,7 @@ class SmartAudioTranscriber:
                     
                     if db_level >= self.db_threshold:
                         # Audio is loud enough - send it!
-                        print(f"🔊 Sending {len(full_audio)/self.input_rate:.1f}s audio ({db_level:.1f}dB)")
+                        # print(f"🔊 Sending {len(full_audio)/self.input_rate:.1f}s audio ({db_level:.1f}dB)")
                         
                         # Resample to target rate for OpenAI
                         resampled = self._resample(full_audio, self.input_rate, self.target_rate)
@@ -234,9 +234,9 @@ class SmartAudioTranscriber:
                             except Exception as e:
                                 if self.running:
                                     print(f"⚠️ Failed to send audio: {e}")
-                    else:
+                    # else:
                         # Too quiet - skip
-                        print(f"🔇 Skipping chunk ({db_level:.1f}dB < {self.db_threshold}dB)")
+                        # print(f"🔇 Skipping chunk ({db_level:.1f}dB < {self.db_threshold}dB)")
                     
                     # Save overlap for next chunk (last 0.5s of current buffer)
                     if len(audio_buffer) > samples_per_overlap:

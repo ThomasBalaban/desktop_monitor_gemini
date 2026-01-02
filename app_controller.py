@@ -230,14 +230,14 @@ class AppController:
                 if self.mic_polling_active:  # Only log if we're not shutting down
                     print(f"❌ Mic polling error: {e}")
                 time.sleep(0.1)
-        print("🎤 Microphone transcript polling stopped.")
+        # print("🎤 Microphone transcript polling stopped.")
 
     def _handle_whisper_transcript(self, transcript):
         """
         Handle desktop audio transcripts from OpenAI Whisper.
         Send to enricher for speaker identification via GPT-4o.
         """
-        print(f"🔊 [Desktop/Raw]: {transcript}")
+        # print(f"🔊 [Desktop/Raw]: {transcript}")
         
         # Add raw transcript to streaming manager for Gemini context
         self.streaming_manager.add_transcript(f"[AUDIO]: {transcript}")
@@ -261,7 +261,7 @@ class AppController:
         Callback when GPT-4o returns an enriched transcript with speaker labels.
         Example: "[0:45] Charlie: (singing hopefully) "Inside of every demon is a rainbow!""
         """
-        print(f"🎭 [Enriched]: {enriched_text}")
+        # print(f"🎭 [Enriched]: {enriched_text}")
         
         # Parse the enriched text to extract speaker (basic parsing)
         speaker = "Unknown"
@@ -302,7 +302,7 @@ class AppController:
             
             if hasattr(self, 'gui') and self.gui:
                 self.gui.add_response(final_text)
-            print(f"👁️ [Gemini Vision]: {final_text}")
+            # print(f"👁️ [Gemini Vision]: {final_text}")
             
             self.websocket_server.broadcast({
                 "type": "text_update",
