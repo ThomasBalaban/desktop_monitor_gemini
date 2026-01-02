@@ -1,257 +1,168 @@
-import asyncio
-import time
 import threading
-from enum import Enum
-from config import PULSE_INTERVAL
-
-class StreamingState(Enum):
-    STOPPED = "stopped"
-    CONNECTING = "connecting"
-    STREAMING = "streaming"
-    RESTARTING = "restarting"
-    ERROR = "error"
+import time
+import base64
+import cv2
+import traceback
+from datetime import datetime
 
 class StreamingManager:
-    def __init__(self, screen_capture, gemini_client, fps=2, restart_interval=1500, debug_mode=False):
+    def __init__(self, screen_capture, gemini_client, target_fps=1.0, restart_interval=1500, debug_mode=False):
         self.screen_capture = screen_capture
         self.gemini_client = gemini_client
-        self.fps = fps
+        self.target_fps = target_fps
+        self.restart_interval = restart_interval  # Restart stream every N frames (if applicable)
         self.debug_mode = debug_mode
-        self.state = StreamingState.STOPPED
-        
-        # Session Management
-        self.restart_interval = restart_interval
-        self.session_start_time = None
-        self.current_loop = None
-        
-        # Pulse Logic - now 4 seconds
-        self.last_pulse_time = 0
-        self.pulse_interval = PULSE_INTERVAL
 
-        # Manual Trigger Logic
-        self.manual_trigger_text = None
-        self.trigger_lock = threading.Lock()
-        
-        # Audio Transcript Buffer (NEW - collects Whisper transcripts)
-        self.transcript_buffer = []
-        self.buffer_lock = threading.Lock()
-        
-        # Tasks
-        self.streaming_task = None
-        self.listener_task = None
+        self.streaming_active = False
+        self.frame_count = 0
+        self.stop_event = threading.Event()
+        self.stream_thread = None
         
         # Callbacks
         self.status_callback = None
-        self.restart_callback = None
         self.error_callback = None
-        self.preview_callback = None 
+        self.restart_callback = None
+        self.preview_callback = None  # New: For GUI preview updates
+        
+        # Audio Context Buffer
+        self.transcript_buffer = []  # Stores recent transcripts to send with next frame
+        self.buffer_lock = threading.Lock()
 
-    def set_status_callback(self, callback): self.status_callback = callback
-    def set_restart_callback(self, callback): self.restart_callback = callback
-    def set_error_callback(self, callback): self.error_callback = callback
-    def set_preview_callback(self, callback): self.preview_callback = callback
+    def set_status_callback(self, callback):
+        self.status_callback = callback
 
-    def _update_status(self, status, color="black"):
-        if self.status_callback:
-            self.status_callback(status, color)
+    def set_error_callback(self, callback):
+        self.error_callback = callback
 
-    def _report_error(self, message):
-        if self.error_callback:
-            self.error_callback(message)
-
-    def trigger_manual_analysis(self, text):
-        """Queues a text prompt to be sent with the NEXT frame."""
-        with self.trigger_lock:
-            self.manual_trigger_text = text
-        self.info_print(f"Manual analysis queued: {text}")
-
-    def add_transcript(self, transcript):
-        """Add a Whisper transcript to the buffer (called from app_controller)."""
-        with self.buffer_lock:
-            self.transcript_buffer.append(transcript)
-            if self.debug_mode:
-                print(f"[Buffer] Added transcript: {transcript[:50]}...")
-
-    def get_and_clear_transcripts(self):
-        """Get all buffered transcripts and clear the buffer."""
-        with self.buffer_lock:
-            transcripts = self.transcript_buffer.copy()
-            self.transcript_buffer.clear()
-            return transcripts
+    def set_restart_callback(self, callback):
+        self.restart_callback = callback
+        
+    def set_preview_callback(self, callback):
+        """Callback to update the GUI preview image."""
+        self.preview_callback = callback
 
     def start_streaming(self):
-        if self.state != StreamingState.STOPPED:
-            return False
-        self.state = StreamingState.CONNECTING
-        self.session_start_time = time.time()
+        if self.streaming_active:
+            return
+
+        print("StreamingManager: Starting stream...")
+        self.streaming_active = True
+        self.stop_event.clear()
+        self.frame_count = 0
         
-        def run_streaming():
-            self.current_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(self.current_loop)
-            try:
-                self.current_loop.run_until_complete(self._run_streaming_session())
-            except Exception as e:
-                self.info_print(f"Streaming thread error: {e}")
-                self.state = StreamingState.ERROR
-                self._update_status("Error occurred", "red")
-                self._report_error(f"Streaming thread error: {e}")
-            finally:
-                if self.current_loop and not self.current_loop.is_closed():
-                    self.current_loop.close()
-                self.current_loop = None
-                if self.state not in [StreamingState.RESTARTING, StreamingState.STOPPED]:
-                    self.state = StreamingState.STOPPED
-        
-        threading.Thread(target=run_streaming, daemon=True).start()
-        return True
+        self.stream_thread = threading.Thread(target=self._stream_loop, daemon=True)
+        self.stream_thread.start()
 
     def stop_streaming(self):
-        self.info_print("Stopping streaming...")
-        self.state = StreamingState.STOPPED
-        self.session_start_time = None
-        self._cleanup_async_tasks()
-        self._update_status("Stopped", "red")
-        return True
-
-    def restart_streaming_session(self):
-        if self.state == StreamingState.RESTARTING or self.state == StreamingState.STOPPED:
+        if not self.streaming_active:
             return
-        self.info_print("Restarting streaming session (Context Refresh)...")
-        self.state = StreamingState.RESTARTING
-        if self.restart_callback:
-            self.restart_callback()
-            
-        self._cleanup_async_tasks()
-        time.sleep(1.5)
+
+        print("StreamingManager: Stopping stream...")
+        self.streaming_active = False
+        self.stop_event.set()
+        if self.stream_thread:
+            self.stream_thread.join(timeout=2)
+            self.stream_thread = None
+
+    def add_transcript(self, text):
+        """
+        Received from AppController (Mic or Desktop audio).
+        Buffers the text to be sent alongside the next video frame.
+        """
+        with self.buffer_lock:
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            # Format: [10:05:00] [USER]: Hello world
+            entry = f"[{timestamp}] {text}"
+            self.transcript_buffer.append(entry)
+            if self.debug_mode:
+                print(f"StreamingManager buffered: {entry}")
+
+    def trigger_manual_analysis(self, prompt_override=None):
+        """
+        Manually captures a frame and sends it, regardless of the loop timer.
+        Useful for 'Ask AI' buttons.
+        """
+        print("StreamingManager: Manual analysis triggered.")
+        threading.Thread(target=self._process_single_frame, args=(prompt_override,), daemon=True).start()
+
+    def _process_single_frame(self, prompt_override=None):
+        """Helper to capture and send one frame."""
+        frame = self.screen_capture.capture_frame()
+        if frame:
+            if self.preview_callback:
+                self.preview_callback(frame)
+            self._send_frame_to_gemini(frame, prompt_suffix=prompt_override)
+
+    def _stream_loop(self):
+        delay = 1.0 / self.target_fps
         
-        if self.state != StreamingState.RESTARTING:
-            return
-            
-        self.state = StreamingState.STOPPED
-        if not self.start_streaming():
-            self.info_print("Failed to restart streaming session")
-            self.state = StreamingState.ERROR
-            self._update_status("Restart failed", "red")
-
-    def _cleanup_async_tasks(self):
-        if self.current_loop and not self.current_loop.is_closed():
-            tasks = [self.streaming_task, self.listener_task]
-            for task in tasks:
-                if task and not task.done():
-                    self.current_loop.call_soon_threadsafe(task.cancel)
-            
-            future = asyncio.run_coroutine_threadsafe(self.gemini_client.disconnect(), self.current_loop)
-            try:
-                future.result(timeout=3.0)
-            except Exception:
-                pass
-
-    async def _run_streaming_session(self):
-        try:
-            self._update_status("Connecting...", "orange")
-            if await self.gemini_client.connect():
-                if self.state == StreamingState.RESTARTING: return
-                
-                self.state = StreamingState.STREAMING
-                self._update_status("Watching (4s pulse)", "green")
-                
-                await asyncio.sleep(1.0) 
-                
-                self.listener_task = asyncio.create_task(self.gemini_client.listen_for_responses())
-                self.streaming_task = asyncio.create_task(self._streaming_loop())
-                
-                await asyncio.gather(self.streaming_task, self.listener_task, return_exceptions=True)
-            else:
-                self.state = StreamingState.ERROR
-                self._update_status("Connection failed", "red")
-                self._report_error("Failed to connect to Gemini")
-        except Exception as e:
-            self.info_print(f"Streaming session error: {e}")
-            self.state = StreamingState.ERROR
-            self._update_status("Error occurred", "red")
-        finally:
-            await self.gemini_client.disconnect()
-            if self.state not in [StreamingState.RESTARTING, StreamingState.STOPPED]:
-                self.state = StreamingState.STOPPED
-                self._update_status("Stopped", "red")
-
-    async def _streaming_loop(self):
-        frame_interval = 1.0 / self.fps
-        while self.state == StreamingState.STREAMING:
+        while self.streaming_active and not self.stop_event.is_set():
             start_time = time.time()
+            
             try:
-                # 1. Capture frame (always - feeds Gemini's visual buffer)
+                # 1. Capture Frame
                 frame = self.screen_capture.capture_frame()
-                base64_image = None
+                
                 if frame:
-                    if self.preview_callback: 
+                    self.frame_count += 1
+                    
+                    # 2. Update GUI Preview
+                    if self.preview_callback:
                         self.preview_callback(frame)
-                    base64_image = self.screen_capture.image_to_base64(frame)
-                
-                # 2. Check if it's time for a pulse (every 4 seconds)
-                turn_complete = False 
-                combined_text = None
-                current_time = time.time()
-                time_since_pulse = current_time - self.last_pulse_time
-                
-                # Check Manual Trigger
-                with self.trigger_lock:
-                    if self.manual_trigger_text:
-                        combined_text = self.manual_trigger_text
-                        turn_complete = True
-                        self.manual_trigger_text = None
-                        self.last_pulse_time = current_time
 
-                # Regular pulse every 4 seconds
-                if not turn_complete and time_since_pulse >= self.pulse_interval:
-                    turn_complete = True
-                    self.last_pulse_time = current_time
+                    # 3. Send to Gemini
+                    self._send_frame_to_gemini(frame)
                     
-                    # Get buffered transcripts
-                    transcripts = self.get_and_clear_transcripts()
-                    if transcripts:
-                        combined_text = "AUDIO FROM LAST 4 SECONDS:\n" + "\n".join(f"- {t}" for t in transcripts)
-                    else:
-                        combined_text = "AUDIO FROM LAST 4 SECONDS:\n(No speech detected)"
-                    
-                    if self.debug_mode:
-                        print(f"[Pulse] Sending {len(transcripts)} transcripts to Gemini")
-
-                # 3. Send to Gemini
-                send_success = await self.gemini_client.send_multimodal_frame(
-                    base64_image, 
-                    None,  # No raw audio - using transcripts instead
-                    turn_complete, 
-                    text=combined_text
-                )
-
-                if not send_success:
-                    self.info_print("Failed to send frame (connection lost). Ending session.")
-                    self.state = StreamingState.ERROR
-                    break
-                
-                # 4. Session Time Limit Check
-                if self.session_start_time and (time.time() - self.session_start_time) >= self.restart_interval:
-                    self.info_print("Session time limit reached. Initiating restart.")
-                    threading.Thread(target=self.restart_streaming_session, daemon=True).start()
-                    break
-
-                # Sleep to maintain FPS
-                elapsed = time.time() - start_time
-                delay = max(0, frame_interval - elapsed)
-                await asyncio.sleep(delay)
-                
-            except asyncio.CancelledError:
-                break
+                    # 4. Periodic Restart Logic (to manage context window or token limits if needed)
+                    if self.restart_interval and self.frame_count % self.restart_interval == 0:
+                        if self.restart_callback:
+                            self.restart_callback()
+                        # Optional: Reset session or clear history if needed
+                        pass
+                        
+                else:
+                    if self.error_callback:
+                        self.error_callback("Failed to capture frame")
+            
             except Exception as e:
-                self.info_print(f"Error in streaming loop: {e}")
-                self._report_error(f"Streaming loop error: {e}")
-                self.state = StreamingState.ERROR
-                break
+                traceback.print_exc()
+                if self.error_callback:
+                    self.error_callback(f"Stream Loop Error: {e}")
 
-    def debug_print(self, message):
-        if self.debug_mode:
-            print(f"[DEBUG] {message}")
+            # Maintain FPS
+            elapsed = time.time() - start_time
+            sleep_time = max(0, delay - elapsed)
+            time.sleep(sleep_time)
 
-    def info_print(self, message):
-        print(message)
+    def _send_frame_to_gemini(self, frame_data, prompt_suffix=None):
+        """
+        Encodes the frame and sends it along with any buffered audio transcripts.
+        """
+        try:
+            # 1. Get Buffered Transcripts
+            current_context = ""
+            with self.buffer_lock:
+                if self.transcript_buffer:
+                    # Join all recent logs
+                    joined_logs = "\n".join(self.transcript_buffer)
+                    current_context = f"\n\nRECENT AUDIO LOGS:\n{joined_logs}\n"
+                    # Clear buffer after consuming
+                    self.transcript_buffer.clear()
+            
+            # 2. Construct the message
+            # If we have a manual prompt override, use it. Otherwise rely on system prompt + context.
+            text_part = current_context
+            if prompt_suffix:
+                text_part += f"\nUser Instruction: {prompt_suffix}"
+            
+            # If there is no audio context and no specific instruction, 
+            # we send just the image (Gemini uses the system prompt configured in client).
+            # However, the client.send_message usually expects (image, text) or just image.
+            
+            # Note: We pass the text_part to the client. The client handles how to format it for the API.
+            self.gemini_client.send_message(frame_data, text_prompt=text_part if text_part.strip() else None)
+
+        except Exception as e:
+            print(f"StreamingManager Send Error: {e}")
+            if self.error_callback:
+                self.error_callback(str(e))
