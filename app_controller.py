@@ -3,6 +3,7 @@ from datetime import datetime
 import threading
 import time
 import os
+from queue import Empty
 
 from config_loader import ConfigLoader
 from gemini_client import GeminiClient
@@ -10,10 +11,10 @@ from screen_capture import ScreenCapture
 from streaming_manager import StreamingManager
 from app_gui import AppGUI
 from websocket_server import WebSocketServer, WEBSOCKET_PORT
+from transcriber_core.microphone import MicrophoneTranscriber
 
 # OpenAI Realtime imports
 from openai_realtime_client import OpenAIRealtimeClient
-# UPDATED: Pointing to new audio_utils location
 from transcriber_core.openai_streamer import SmartAudioTranscriber
 
 
@@ -39,8 +40,12 @@ class AppController:
             self.config.debug_mode,
             audio_sample_rate=self.config.audio_sample_rate
         )
+        
+        # 3. Initialize Parakeet Microphone Transcriber
+        self.mic_transcriber = MicrophoneTranscriber(keep_files=False)
+        self.mic_polling_active = True  # Flag to control polling loop
 
-        # 3. Initialize Streaming Manager (sends frames + buffered transcripts to Gemini)
+        # 4. Initialize Streaming Manager (sends frames + buffered transcripts to Gemini)
         self.streaming_manager = StreamingManager(
             self.screen_capture, self.gemini_client, self.config.fps,
             restart_interval=1500, debug_mode=self.config.debug_mode
@@ -49,16 +54,16 @@ class AppController:
         self.streaming_manager.set_error_callback(self._on_streaming_error)
         self.streaming_manager.set_preview_callback(self.gui_update_wrapper)
         
-        # 4. Initialize WebSocket Server
+        # 5. Initialize WebSocket Server
         self.websocket_server = WebSocketServer()
         self.current_response_buffer = ""
         
-        # 5. Initialize GUI
+        # 6. Initialize GUI
         self.gui = AppGUI(self)
         
-        # 6. Initialize OpenAI Realtime (Whisper for transcription only)
+        # 7. Initialize OpenAI Realtime (Whisper for desktop audio transcription)
         if not self.config.is_openai_key_configured():
-            print("⚠️ WARNING: OPENAI_API_KEY not configured. Audio transcription will not work.")
+            print("⚠️ WARNING: OPENAI_API_KEY not configured. Desktop audio transcription will not work.")
             self.gui.add_error("OPENAI_API_KEY missing in api_keys.py")
             self.openai_client = None
             self.smart_transcriber = None
@@ -85,9 +90,16 @@ class AppController:
             self.gui.update_preview(frame)
 
     def run(self):
-        # Start Audio Transcription (Whisper)
+        # Start Microphone Transcriber (Parakeet MLX)
+        print(f"🎙️ Starting Parakeet MLX Microphone Transcriber...")
+        threading.Thread(target=self.mic_transcriber.run, daemon=True).start()
+        
+        # Start polling microphone results
+        threading.Thread(target=self._poll_mic_transcripts, daemon=True).start()
+
+        # Start Desktop Audio Transcription (OpenAI Whisper)
         if self.smart_transcriber:
-            print(f"🎙️ Starting OpenAI Whisper on Device {self.config.audio_device_id}...")
+            print(f"🔊 Starting OpenAI Whisper for Desktop Audio on Device {self.config.audio_device_id}...")
             self.smart_transcriber.start()
         
         if not self.config.is_api_key_configured():
@@ -100,16 +112,46 @@ class AppController:
             self.gui.run()
         finally:
             print("Shutting down services...")
+            self.mic_polling_active = False
             if self.smart_transcriber:
                 self.smart_transcriber.stop()
             self.streaming_manager.stop_streaming()
 
+    def _poll_mic_transcripts(self):
+        """Poll the microphone transcriber's result queue for Parakeet transcriptions."""
+        print("🎤 Microphone transcript polling started...")
+        
+        while self.mic_polling_active:
+            try:
+                # result_queue contains: (text, filename, source, confidence)
+                text, filename, source, confidence = self.mic_transcriber.result_queue.get(timeout=0.1)
+                
+                if text and len(text.strip()) > 0:
+                    print(f"🎙️ [Mic/Parakeet]: {text}")
+                    self.streaming_manager.add_transcript(f"[USER]: {text}")
+                    self.websocket_server.broadcast({
+                        "type": "raw_transcript",
+                        "source": "microphone",
+                        "text": text,
+                        "confidence": confidence,
+                        "timestamp": time.time()
+                    })
+            except Empty:
+                # No transcripts available, continue polling
+                continue
+            except Exception as e:
+                print(f"❌ Mic polling error: {e}")
+                time.sleep(0.1)
+        
+        print("🎤 Microphone transcript polling stopped.")
+
     def _handle_whisper_transcript(self, transcript):
-        print(f"🎤 [Whisper]: {transcript}")
-        self.streaming_manager.add_transcript(transcript)
+        """Handle transcripts from OpenAI Whisper (desktop audio)."""
+        print(f"🔊 [Desktop/Whisper]: {transcript}")
+        self.streaming_manager.add_transcript(f"[AUDIO]: {transcript}")
         self.websocket_server.broadcast({
             "type": "raw_transcript",
-            "source": "whisper",
+            "source": "desktop_whisper",
             "text": transcript,
             "timestamp": time.time()
         })
