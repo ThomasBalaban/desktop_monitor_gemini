@@ -17,6 +17,9 @@ from transcriber_core.microphone import MicrophoneTranscriber
 from openai_realtime_client import OpenAIRealtimeClient
 from transcriber_core.openai_streamer import SmartAudioTranscriber
 
+# Transcript Enricher (GPT-4o speaker diarization)
+from transcript_enricher import TranscriptEnricher
+
 
 class AppController:
     def __init__(self):
@@ -65,13 +68,17 @@ class AppController:
         # 6. Initialize GUI
         self.gui = AppGUI(self)
         
-        # 7. Initialize OpenAI Realtime
+        # 7. Initialize OpenAI Realtime + Transcript Enricher
+        self.smart_transcriber = None
+        self.transcript_enricher = None
+        self.last_gemini_context = ""  # Store latest Gemini visual analysis
+        
         if not self.config.is_openai_key_configured():
             print("⚠️ WARNING: OPENAI_API_KEY not configured. Desktop audio transcription will not work.")
             self.gui.add_error("OPENAI_API_KEY missing in api_keys.py")
             self.openai_client = None
-            self.smart_transcriber = None
         else:
+            # OpenAI Realtime for transcription
             self.openai_client = OpenAIRealtimeClient(
                 api_key=self.config.openai_api_key,
                 on_transcript=self._handle_whisper_transcript,
@@ -80,6 +87,12 @@ class AppController:
             self.smart_transcriber = SmartAudioTranscriber(
                 self.openai_client, 
                 device_id=self.config.audio_device_id
+            )
+            
+            # GPT-4o Transcript Enricher for speaker diarization
+            self.transcript_enricher = TranscriptEnricher(
+                api_key=self.config.openai_api_key,
+                on_enriched_transcript=self._on_enriched_transcript
             )
 
         if self.config.video_device_index is None:
@@ -99,6 +112,11 @@ class AppController:
         if self.smart_transcriber:
             print(f"🔊 Starting OpenAI Whisper for Desktop Audio on Device {self.config.audio_device_id}...")
             self.smart_transcriber.start()
+        
+        # Start the transcript enricher
+        if self.transcript_enricher:
+            print(f"🎭 Starting GPT-4o Transcript Enricher (Speaker Diarization)...")
+            self.transcript_enricher.start()
         
         if not self.config.is_api_key_configured():
             self.gui.update_status("ERROR: GEMINI_API_KEY not configured", "red")
@@ -123,18 +141,18 @@ class AppController:
         print("="*50)
         
         # 1. Stop polling loops first
-        print("  [1/6] Stopping polling loops...")
+        print("  [1/7] Stopping polling loops...")
         self.mic_polling_active = False
         
         # 2. Stop streaming manager (stops sending frames to Gemini)
-        print("  [2/6] Stopping Gemini streaming...")
+        print("  [2/7] Stopping Gemini streaming...")
         try:
             self.streaming_manager.stop_streaming()
         except Exception as e:
             print(f"    ⚠️ Streaming manager error: {e}")
         
         # 3. Stop microphone transcriber (Parakeet)
-        print("  [3/6] Stopping Parakeet microphone transcriber...")
+        print("  [3/7] Stopping Parakeet microphone transcriber...")
         try:
             if hasattr(self, 'mic_transcriber'):
                 self.mic_transcriber.stop_event.set()
@@ -143,22 +161,30 @@ class AppController:
             print(f"    ⚠️ Mic transcriber error: {e}")
             
         # 4. Stop OpenAI Realtime / Smart Transcriber (Whisper)
-        print("  [4/6] Stopping OpenAI Whisper transcriber...")
+        print("  [4/7] Stopping OpenAI Whisper transcriber...")
         try:
             if self.smart_transcriber:
                 self.smart_transcriber.stop()
         except Exception as e:
             print(f"    ⚠️ Smart transcriber error: {e}")
+        
+        # 5. Stop Transcript Enricher
+        print("  [5/7] Stopping GPT-4o Transcript Enricher...")
+        try:
+            if self.transcript_enricher:
+                self.transcript_enricher.stop()
+        except Exception as e:
+            print(f"    ⚠️ Transcript enricher error: {e}")
             
-        # 5. Stop WebSocket server
-        print("  [5/6] Stopping WebSocket server...")
+        # 6. Stop WebSocket server
+        print("  [6/7] Stopping WebSocket server...")
         try:
             self.websocket_server.stop()
         except Exception as e:
             print(f"    ⚠️ WebSocket server error: {e}")
         
-        # 6. Release screen capture resources
-        print("  [6/6] Releasing screen capture...")
+        # 7. Release screen capture resources
+        print("  [7/7] Releasing screen capture...")
         try:
             if hasattr(self, 'screen_capture'):
                 self.screen_capture.release()
@@ -185,12 +211,16 @@ class AppController:
                 text, filename, source, confidence = self.mic_transcriber.result_queue.get(timeout=0.1)
                 
                 if text and len(text.strip()) > 0:
-                    print(f"🎙️ [Mic/Parakeet]: {text}")
+                    print(f"🎙️ [Mic/User]: {text}")
                     self.streaming_manager.add_transcript(f"[USER]: {text}")
+                    
+                    # Microphone is always the user - no enrichment needed
                     self.websocket_server.broadcast({
                         "type": "transcript",
                         "source": "microphone",
+                        "speaker": "User",
                         "text": text,
+                        "enriched": False,
                         "confidence": confidence,
                         "timestamp": time.time()
                     })
@@ -203,12 +233,55 @@ class AppController:
         print("🎤 Microphone transcript polling stopped.")
 
     def _handle_whisper_transcript(self, transcript):
-        print(f"🔊 [Desktop/Whisper]: {transcript}")
+        """
+        Handle desktop audio transcripts from OpenAI Whisper.
+        Send to enricher for speaker identification via GPT-4o.
+        """
+        print(f"🔊 [Desktop/Raw]: {transcript}")
+        
+        # Add raw transcript to streaming manager for Gemini context
         self.streaming_manager.add_transcript(f"[AUDIO]: {transcript}")
+        
+        # Send to enricher for speaker diarization
+        if self.transcript_enricher:
+            self.transcript_enricher.enrich(transcript)
+        else:
+            # Fallback: broadcast raw transcript if enricher not available
+            self.websocket_server.broadcast({
+                "type": "transcript",
+                "source": "desktop",
+                "speaker": "Unknown",
+                "text": transcript,
+                "enriched": False,
+                "timestamp": time.time()
+            })
+
+    def _on_enriched_transcript(self, enriched_text):
+        """
+        Callback when GPT-4o returns an enriched transcript with speaker labels.
+        Example: "[0:45] Charlie: (singing hopefully) "Inside of every demon is a rainbow!""
+        """
+        print(f"🎭 [Enriched]: {enriched_text}")
+        
+        # Parse the enriched text to extract speaker (basic parsing)
+        speaker = "Unknown"
+        try:
+            # Format is typically: [timestamp] Speaker: (tone) "text"
+            # Try to extract speaker name
+            import re
+            match = re.search(r'\[\d+:\d+\]\s*(?:\[.*?\]\s*)?([^:(]+?)(?:\s*\([^)]+\))?:', enriched_text)
+            if match:
+                speaker = match.group(1).strip()
+        except:
+            pass
+        
+        # Broadcast enriched transcript via WebSocket
         self.websocket_server.broadcast({
             "type": "transcript",
             "source": "desktop",
-            "text": transcript,
+            "speaker": speaker,
+            "text": enriched_text,
+            "enriched": True,
             "timestamp": time.time()
         })
 
@@ -221,9 +294,16 @@ class AppController:
         self.current_response_buffer += text_chunk
         if self.current_response_buffer.strip().endswith(('.', '!', '?', '"', '\n')):
             final_text = self.current_response_buffer.strip()
+            
+            # Store the visual context for the enricher
+            self.last_gemini_context = final_text
+            if self.transcript_enricher:
+                self.transcript_enricher.update_visual_context(final_text)
+            
             if hasattr(self, 'gui') and self.gui:
                 self.gui.add_response(final_text)
-            print(f"🎭 [SCREEN]: {final_text}")
+            print(f"👁️ [Gemini Vision]: {final_text}")
+            
             self.websocket_server.broadcast({
                 "type": "text_update",
                 "timestamp": datetime.now().isoformat(),

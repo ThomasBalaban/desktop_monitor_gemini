@@ -1,7 +1,7 @@
 import asyncio
 import json
 import threading
-import websockets
+import websockets  # type: ignore
 import time
 import queue
 
