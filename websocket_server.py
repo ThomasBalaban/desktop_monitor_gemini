@@ -13,26 +13,35 @@ class WebSocketServer:
         self.connected_clients = set()
         self.loop = None
         self.server_task = None
+        self.running = True  # Track running state for clean shutdown
 
     def start(self):
         """Starts the WebSocket server in a new thread."""
         thread = threading.Thread(target=self._run_server_in_thread, daemon=True)
         thread.start()
         
-        # Start Heartbeat Thread (New)
+        # Start Heartbeat Thread
         threading.Thread(target=self._heartbeat_loop, daemon=True).start()
         
         print(f"WebSocket server for AI clients starting on ws://localhost:{WEBSOCKET_PORT}")
 
+    def stop(self):
+        """Cleanly stops the WebSocket server and heartbeat logic."""
+        self.running = False
+        if self.loop and self.loop.is_running():
+            self.loop.call_soon_threadsafe(self.loop.stop)
+        print("WebSocket server stopped.")
+
     def _heartbeat_loop(self):
         """Sends a pulse every 5 seconds so clients know we are alive."""
-        while True:
+        while self.running:
             time.sleep(5)
-            self.broadcast({
-                "type": "heartbeat",
-                "timestamp": time.time(),
-                "status": "active"
-            })
+            if self.running:
+                self.broadcast({
+                    "type": "heartbeat",
+                    "timestamp": time.time(),
+                    "status": "active"
+                })
 
     def _run_server_in_thread(self):
         """Sets up and runs the asyncio event loop for the server."""
@@ -54,7 +63,6 @@ class WebSocketServer:
         print(f"New AI client connected. Total clients: {len(self.connected_clients)}")
         
         try:
-            # Send a welcome message to the newly connected client
             welcome_message = {
                 "type": "connection_established",
                 "timestamp": asyncio.get_event_loop().time(),
@@ -62,7 +70,6 @@ class WebSocketServer:
             }
             await websocket.send(json.dumps(welcome_message))
             
-            # Keep the connection alive by listening for messages
             async for message in websocket:
                 try:
                     data = json.loads(message)
@@ -72,35 +79,24 @@ class WebSocketServer:
                             "timestamp": asyncio.get_event_loop().time()
                         }
                         await websocket.send(json.dumps(response))
-                        
-                except json.JSONDecodeError:
-                    print(f"Received non-JSON message: {message}")
                 except Exception as e:
                     print(f"Error handling message: {e}")
                     
         except websockets.exceptions.ConnectionClosed:
             print("Client disconnected normally")
-        except Exception as e:
-            print(f"Error in connection handler: {e}")
         finally:
-            # Clean up when client disconnects
             if websocket in self.connected_clients:
                 self.connected_clients.remove(websocket)
-            print(f"AI client disconnected. Total clients: {len(self.connected_clients)}")
 
     def _is_websocket_open(self, websocket):
-        """Check if websocket is open, handling different websockets library versions"""
+        """Check if websocket is open."""
         try:
             if hasattr(websocket, 'closed'):
                 return not websocket.closed
-            elif hasattr(websocket, 'close_code'):
-                return websocket.close_code is None
             elif hasattr(websocket, 'state'):
                 return str(websocket.state) == "State.OPEN"
-            else:
-                return True
-        except Exception as e:
-            print(f"Error checking websocket state: {e}")
+            return True
+        except:
             return False
 
     async def _broadcast_coro(self, data):
@@ -116,35 +112,16 @@ class WebSocketServer:
                         clients_to_remove.add(client)
                         continue
                     tasks.append(client.send(message))
-                except Exception as e:
-                    print(f"Error preparing to send to client: {e}")
+                except:
                     clients_to_remove.add(client)
             
             for client in clients_to_remove:
                 self.connected_clients.discard(client)
             
             if tasks:
-                try:
-                    await asyncio.gather(*tasks, return_exceptions=True)
-                except Exception as e:
-                    print(f"Error broadcasting message: {e}")
+                await asyncio.gather(*tasks, return_exceptions=True)
 
     def broadcast(self, data):
         """Thread-safely broadcasts data to all connected clients."""
-        # 1. Create the coroutine object
-        coro = self._broadcast_coro(data)
-        
-        # 2. Check if we have a valid loop running in the background thread
         if self.loop and self.loop.is_running():
-            # 3. Safely hand it over to the thread
-            future = asyncio.run_coroutine_threadsafe(coro, self.loop)
-            
-            # 4. Optional: Print errors if the broadcast fails silently
-            try:
-                # We don't wait for the result to keep it non-blocking, 
-                # but we can catch immediate errors if needed.
-                pass 
-            except Exception as e:
-                print(f"Broadcast error: {e}")
-        else:
-            print("⚠️ Cannot broadcast: WebSocket loop is not running.")
+            asyncio.run_coroutine_threadsafe(self._broadcast_coro(data), self.loop)

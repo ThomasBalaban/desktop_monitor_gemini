@@ -29,7 +29,7 @@ class AppController:
             video_index=self.config.video_device_index
         )
         
-        # 2. Initialize Gemini Client (handles both vision AND audio interpretation)
+        # 2. Initialize Gemini Client
         self.gemini_client = GeminiClient(
             self.config.api_key, 
             self.config.prompt, 
@@ -43,9 +43,9 @@ class AppController:
         
         # 3. Initialize Parakeet Microphone Transcriber
         self.mic_transcriber = MicrophoneTranscriber(keep_files=False)
-        self.mic_polling_active = True  # Flag to control polling loop
+        self.mic_polling_active = True 
 
-        # 4. Initialize Streaming Manager (sends frames + buffered transcripts to Gemini)
+        # 4. Initialize Streaming Manager
         self.streaming_manager = StreamingManager(
             self.screen_capture, self.gemini_client, self.config.fps,
             restart_interval=1500, debug_mode=self.config.debug_mode
@@ -61,7 +61,7 @@ class AppController:
         # 6. Initialize GUI
         self.gui = AppGUI(self)
         
-        # 7. Initialize OpenAI Realtime (Whisper for desktop audio transcription)
+        # 7. Initialize OpenAI Realtime
         if not self.config.is_openai_key_configured():
             print("⚠️ WARNING: OPENAI_API_KEY not configured. Desktop audio transcription will not work.")
             self.gui.add_error("OPENAI_API_KEY missing in api_keys.py")
@@ -78,11 +78,9 @@ class AppController:
                 device_id=self.config.audio_device_id
             )
 
-        # Only init region if we are NOT using a camera
         if self.config.video_device_index is None:
             self._initialize_capture_region()
             
-        # Delay stream start
         self.gui.root.after(2000, self._start_stream_on_init)
 
     def gui_update_wrapper(self, frame):
@@ -90,14 +88,10 @@ class AppController:
             self.gui.update_preview(frame)
 
     def run(self):
-        # Start Microphone Transcriber (Parakeet MLX)
         print(f"🎙️ Starting Parakeet MLX Microphone Transcriber...")
         threading.Thread(target=self.mic_transcriber.run, daemon=True).start()
-        
-        # Start polling microphone results
         threading.Thread(target=self._poll_mic_transcripts, daemon=True).start()
 
-        # Start Desktop Audio Transcription (OpenAI Whisper)
         if self.smart_transcriber:
             print(f"🔊 Starting OpenAI Whisper for Desktop Audio on Device {self.config.audio_device_id}...")
             self.smart_transcriber.start()
@@ -111,47 +105,66 @@ class AppController:
         try:
             self.gui.run()
         finally:
-            print("Shutting down services...")
-            self.mic_polling_active = False
-            if self.smart_transcriber:
-                self.smart_transcriber.stop()
-            self.streaming_manager.stop_streaming()
+            self.stop() # Ensure all services stop if gui.run exits
+
+    def stop(self):
+        """Unified shutdown logic to stop all threads and clean up resources."""
+        print("🛑 Shutting down services...")
+        
+        # Stop polling loops
+        self.mic_polling_active = False
+        
+        # Stop background managers/services
+        self.streaming_manager.stop_streaming()
+        
+        if hasattr(self, 'mic_transcriber'):
+            # Signal the actual audio capture loop to stop
+            self.mic_transcriber.stop_event.set() 
+            
+        if self.smart_transcriber:
+            self.smart_transcriber.stop()
+            
+        self.websocket_server.stop()
+        
+        # Kill GUI if still alive
+        try:
+            if self.gui.root.winfo_exists():
+                self.gui.root.quit()
+                self.gui.root.destroy()
+        except:
+            pass
 
     def _poll_mic_transcripts(self):
-        """Poll the microphone transcriber's result queue for Parakeet transcriptions."""
         print("🎤 Microphone transcript polling started...")
-        
         while self.mic_polling_active:
             try:
-                # result_queue contains: (text, filename, source, confidence)
                 text, filename, source, confidence = self.mic_transcriber.result_queue.get(timeout=0.1)
                 
                 if text and len(text.strip()) > 0:
                     print(f"🎙️ [Mic/Parakeet]: {text}")
                     self.streaming_manager.add_transcript(f"[USER]: {text}")
+                    # UPDATED: Changed 'raw_transcript' to 'transcript' for Director Engine
                     self.websocket_server.broadcast({
-                        "type": "raw_transcript",
+                        "type": "transcript",
                         "source": "microphone",
                         "text": text,
                         "confidence": confidence,
                         "timestamp": time.time()
                     })
             except Empty:
-                # No transcripts available, continue polling
                 continue
             except Exception as e:
                 print(f"❌ Mic polling error: {e}")
                 time.sleep(0.1)
-        
         print("🎤 Microphone transcript polling stopped.")
 
     def _handle_whisper_transcript(self, transcript):
-        """Handle transcripts from OpenAI Whisper (desktop audio)."""
         print(f"🔊 [Desktop/Whisper]: {transcript}")
         self.streaming_manager.add_transcript(f"[AUDIO]: {transcript}")
+        # UPDATED: Changed 'raw_transcript' to 'transcript' and source to 'desktop'
         self.websocket_server.broadcast({
-            "type": "raw_transcript",
-            "source": "desktop_whisper",
+            "type": "transcript",
+            "source": "desktop",
             "text": transcript,
             "timestamp": time.time()
         })
@@ -166,8 +179,9 @@ class AppController:
             final_text = self.current_response_buffer.strip()
             self.gui.add_response(final_text)
             print(f"🎭 [SCREEN]: {final_text}")
+            # UPDATED: Changed 'screen_analysis' to 'text_update' and field 'content'
             self.websocket_server.broadcast({
-                "type": "screen_analysis",
+                "type": "text_update",
                 "timestamp": datetime.now().isoformat(),
                 "content": final_text
             })

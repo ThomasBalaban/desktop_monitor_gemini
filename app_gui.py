@@ -12,11 +12,14 @@ class AppGUI:
         self.default_font = font.nametofont("TkDefaultFont")
         self.default_font.configure(family="Helvetica", size=11)
         
+        # UPDATED: Handle the window close event correctly
+        self.root.protocol("WM_DELETE_WINDOW", self.controller.stop)
+        
         # --- Layout Frames ---
         top_frame = tk.Frame(self.root, bg="#2E2E2E", padx=10, pady=10)
         top_frame.pack(fill=tk.X)
         
-        # Add Analysis Button (New)
+        # Add Analysis Button
         self.btn_analyze = tk.Button(top_frame, text="Analyze Last 5s", 
                                      command=self.controller.request_analysis, 
                                      bg="#4CAF50", fg="white", 
