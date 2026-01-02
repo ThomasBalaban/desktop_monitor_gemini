@@ -95,6 +95,8 @@ class SmartAudioTranscriber:
                     time.sleep(2.0)
             except Exception as e:
                 print(f"❌ Critical Audio Error: {e}")
+                import traceback
+                traceback.print_exc()
                 break
         
         if retry_count >= max_retries:
@@ -136,8 +138,18 @@ class SmartAudioTranscriber:
                     float_audio = np.clip(float_audio, -1.0, 1.0)
                     resampled = self._resample(float_audio, self.input_rate, self.target_rate)
                     pcm_bytes = (resampled * 32767).astype(np.int16).tobytes()
+                    
+                    # Safely schedule the async send on the event loop
                     if self.loop and self.loop.is_running() and len(pcm_bytes) > 0:
-                        asyncio.run_coroutine_threadsafe(self.client.send_audio_chunk(pcm_bytes), self.loop)
+                        try:
+                            # send_audio_chunk is now an async method, so this is correct
+                            asyncio.run_coroutine_threadsafe(
+                                self.client.send_audio_chunk(pcm_bytes), 
+                                self.loop
+                            )
+                        except Exception as e:
+                            print(f"⚠️ Failed to schedule audio send: {e}")
+                    
                     last_send = current_time
                 
                 max_samples = self.input_rate * 5

@@ -49,10 +49,12 @@ class OpenAIRealtimeClient:
     async def _send_session_update(self):
         if not self.ws: return
         
+        # Configure session for INPUT audio transcription (what the user/desktop says)
         session_update = {
             "type": "session.update",
             "session": {
-                "modalities": ["text"],
+                "modalities": ["text", "audio"],
+                "input_audio_format": "pcm16",
                 "input_audio_transcription": {
                     "model": "whisper-1"
                 },
@@ -60,57 +62,85 @@ class OpenAIRealtimeClient:
                     "type": "server_vad",
                     "threshold": 0.5,
                     "prefix_padding_ms": 300,
-                    "silence_duration_ms": 500
+                    "silence_duration_ms": 700
                 }
             }
         }
         await self.ws.send(json.dumps(session_update))
+        print("📤 Sent session configuration to OpenAI Realtime API")
 
     async def _handle_message(self, message):
         try:
             data = json.loads(message)
             event_type = data.get("type")
+            
+            # Debug: Uncomment to see all events
+            # print(f"📥 OpenAI Event: {event_type}")
 
-            if event_type == "response.audio_transcript.done":
+            # === INPUT AUDIO TRANSCRIPTION EVENTS ===
+            # This is what we want - transcription of the audio WE send
+            if event_type == "conversation.item.input_audio_transcription.completed":
                 text = data.get("transcript", "")
-                if text:
+                if text and text.strip():
                     self.on_transcript(text)
             
+            # Partial/streaming transcription (if available)
+            elif event_type == "conversation.item.input_audio_transcription.delta":
+                # Could use this for real-time partial results
+                pass
+                
+            # === RESPONSE TRANSCRIPTION EVENTS (if model responds) ===
+            elif event_type == "response.audio_transcript.done":
+                text = data.get("transcript", "")
+                if text and text.strip():
+                    print(f"🤖 [AI Response]: {text}")
+                    # Optionally handle AI responses differently
+                    # self.on_transcript(f"[AI]: {text}")
+            
+            # === SESSION EVENTS ===
+            elif event_type == "session.created":
+                print("✅ OpenAI Realtime session created")
+                
+            elif event_type == "session.updated":
+                print("✅ OpenAI Realtime session configured")
+                
+            # === ERROR HANDLING ===
             elif event_type == "error":
-                err_msg = data.get("error", {}).get("message", "Unknown error")
+                err = data.get("error", {})
+                err_msg = err.get("message", "Unknown error")
+                err_code = err.get("code", "unknown")
+                print(f"❌ OpenAI API Error [{err_code}]: {err_msg}")
                 self.on_error(f"API Error: {err_msg}")
+                
+            # === INPUT AUDIO BUFFER EVENTS ===
+            elif event_type == "input_audio_buffer.speech_started":
+                print("🎤 Speech detected in audio buffer")
+                
+            elif event_type == "input_audio_buffer.speech_stopped":
+                print("🎤 Speech ended, processing...")
+                
+            elif event_type == "input_audio_buffer.committed":
+                print("📝 Audio buffer committed for transcription")
 
         except Exception as e:
             print(f"Message Parse Error: {e}")
+            import traceback
+            traceback.print_exc()
 
     # --- ROBUST THREAD-SAFE SENDING ---
     
-    def send_audio_chunk(self, audio_bytes):
+    async def send_audio_chunk(self, audio_bytes):
         """
-        Thread-safe method called from PyAudio thread.
-        Uses call_soon_threadsafe to avoid coroutine object issues.
-        """
-        if self.ws and self.loop:
-            encoded = base64.b64encode(audio_bytes).decode("utf-8")
-            event = {
-                "type": "input_audio_buffer.append",
-                "audio": encoded
-            }
-            # Pass the raw data string to the helper
-            data_str = json.dumps(event)
-            self.loop.call_soon_threadsafe(self._schedule_send, data_str)
-
-    def _schedule_send(self, data_str):
-        """
-        Helper that runs INSIDE the asyncio loop.
-        It is safe to create tasks here.
+        Async method to send audio chunks to the OpenAI Realtime API.
+        Should be called via asyncio.run_coroutine_threadsafe() from other threads.
         """
         if self.ws:
-            asyncio.create_task(self._internal_send(data_str))
-
-    async def _internal_send(self, data_str):
-        """Actual async send."""
-        try:
-            await self.ws.send(data_str)
-        except Exception as e:
-            print(f"Send failed: {e}")
+            try:
+                encoded = base64.b64encode(audio_bytes).decode("utf-8")
+                event = {
+                    "type": "input_audio_buffer.append",
+                    "audio": encoded
+                }
+                await self.ws.send(json.dumps(event))
+            except Exception as e:
+                print(f"Send failed: {e}")
