@@ -13,6 +13,7 @@ from websocket_server import WebSocketServer, WEBSOCKET_PORT
 
 # OpenAI Realtime imports
 from openai_realtime_client import OpenAIRealtimeClient
+# UPDATED: Pointing to new audio_utils location
 from transcriber_core.openai_streamer import SmartAudioTranscriber
 
 
@@ -103,19 +104,9 @@ class AppController:
                 self.smart_transcriber.stop()
             self.streaming_manager.stop_streaming()
 
-    # --- Whisper Transcript Handling ---
-    
     def _handle_whisper_transcript(self, transcript):
-        """
-        Receives raw Whisper transcription.
-        Buffers it for Gemini to process with the next pulse.
-        """
         print(f"🎤 [Whisper]: {transcript}")
-        
-        # Add to streaming manager's buffer (will be sent to Gemini on next pulse)
         self.streaming_manager.add_transcript(transcript)
-        
-        # Also broadcast raw transcript via WebSocket (in case downstream wants it)
         self.websocket_server.broadcast({
             "type": "raw_transcript",
             "source": "whisper",
@@ -127,27 +118,17 @@ class AppController:
         print(f"❌ OpenAI Error: {error_msg}")
         self.gui.add_error(f"OpenAI Error: {error_msg}")
 
-    # --- Gemini Response Handling ---
-
     def _on_gemini_response(self, text_chunk):
-        """Handle Gemini's unified vision+audio analysis response."""
         self.current_response_buffer += text_chunk
-        
-        # Wait for complete sentences
         if self.current_response_buffer.strip().endswith(('.', '!', '?', '"', '\n')):
             final_text = self.current_response_buffer.strip()
-            
-            # Display in GUI
             self.gui.add_response(final_text)
             print(f"🎭 [SCREEN]: {final_text}")
-            
-            # Broadcast unified analysis via WebSocket
             self.websocket_server.broadcast({
                 "type": "screen_analysis",
                 "timestamp": datetime.now().isoformat(),
                 "content": final_text
             })
-            
             self.current_response_buffer = ""
 
     def _on_gemini_error(self, error_message):
@@ -155,8 +136,6 @@ class AppController:
 
     def _on_streaming_error(self, error_message):
         self.gui.add_error(f"Streaming Error: {error_message}")
-
-    # --- Other Methods ---
 
     def request_analysis(self):
         print("Manual analysis triggered.")
@@ -200,8 +179,6 @@ class AppController:
         if self.config.capture_region:
             self.screen_capture.set_capture_region(self.config.capture_region)
             print(f"Using capture region from config: {self.config.get_region_description()}")
-        else:
-            print("No capture region set (will rely on GUI if not using camera)")
 
     def get_prompt(self):
         return self.config.prompt

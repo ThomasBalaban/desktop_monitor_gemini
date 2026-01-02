@@ -29,12 +29,9 @@ class SmartAudioTranscriber:
 
     def start(self):
         self.running = True
-        
         self.loop = asyncio.new_event_loop()
-        
         self.network_thread = threading.Thread(target=self._network_worker, args=(self.loop,), daemon=True)
         self.network_thread.start()
-        
         self.process_thread = threading.Thread(target=self._process_worker, daemon=True)
         self.process_thread.start()
 
@@ -82,7 +79,6 @@ class SmartAudioTranscriber:
         print(f"   Rate: {self.input_rate}Hz → {self.target_rate}Hz | Gain: {self.gain}x")
 
         time.sleep(2.0)
-        
         samples_per_chunk = int(self.input_rate * self.chunk_duration_ms / 1000)
         
         retry_count = 0
@@ -99,8 +95,6 @@ class SmartAudioTranscriber:
                     time.sleep(2.0)
             except Exception as e:
                 print(f"❌ Critical Audio Error: {e}")
-                import traceback
-                traceback.print_exc()
                 break
         
         if retry_count >= max_retries:
@@ -117,7 +111,6 @@ class SmartAudioTranscriber:
             latency='low'
         ):
             print(f"✅ OpenAI Audio Stream Active")
-            
             audio_buffer = np.array([], dtype=np.int16)
             send_interval = 0.1
             last_send = time.time()
@@ -133,31 +126,21 @@ class SmartAudioTranscriber:
                         break
                 
                 current_time = time.time()
-                
                 if current_time - last_send >= send_interval and len(audio_buffer) > 0:
                     chunk_to_send = audio_buffer
                     audio_buffer = np.array([], dtype=np.int16)
-                    
                     float_audio = chunk_to_send.astype(np.float32) / 32768.0
-                    
                     if self.remove_dc:
                         float_audio = float_audio - np.mean(float_audio)
-                    
                     float_audio = float_audio * self.gain
                     float_audio = np.clip(float_audio, -1.0, 1.0)
-
                     resampled = self._resample(float_audio, self.input_rate, self.target_rate)
                     pcm_bytes = (resampled * 32767).astype(np.int16).tobytes()
-                    
                     if self.loop and self.loop.is_running() and len(pcm_bytes) > 0:
-                        asyncio.run_coroutine_threadsafe(
-                            self.client.send_audio_chunk(pcm_bytes), self.loop
-                        )
-                    
+                        asyncio.run_coroutine_threadsafe(self.client.send_audio_chunk(pcm_bytes), self.loop)
                     last_send = current_time
                 
                 max_samples = self.input_rate * 5
                 if len(audio_buffer) > max_samples:
                     audio_buffer = audio_buffer[-samples_per_chunk * 10:]
-                
                 time.sleep(0.02)
