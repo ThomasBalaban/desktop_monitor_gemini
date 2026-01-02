@@ -36,20 +36,57 @@ class SmartAudioTranscriber:
         self.process_thread.start()
 
     def stop(self):
+        """Gracefully stop all threads and connections."""
+        print("    Stopping SmartAudioTranscriber...")
         self.running = False
-        if self.loop:
+        
+        # 1. Disconnect the OpenAI client
+        if self.client and self.loop and self.loop.is_running():
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    self.client.disconnect(), 
+                    self.loop
+                )
+                future.result(timeout=2.0)  # Wait up to 2 seconds
+            except Exception as e:
+                print(f"      Error disconnecting client: {e}")
+        
+        # 2. Stop the event loop
+        if self.loop and self.loop.is_running():
             self.loop.call_soon_threadsafe(self.loop.stop)
-        if self.process_thread:
-            self.process_thread.join(timeout=2)
-        if self.network_thread:
-            self.network_thread.join(timeout=2)
+        
+        # 3. Wait for threads to finish
+        if self.network_thread and self.network_thread.is_alive():
+            self.network_thread.join(timeout=2.0)
+            
+        if self.process_thread and self.process_thread.is_alive():
+            self.process_thread.join(timeout=2.0)
+        
+        # 4. Clear the queue
+        while not self.queue.empty():
+            try:
+                self.queue.get_nowait()
+            except:
+                break
+                
+        print("    SmartAudioTranscriber stopped.")
 
     def _network_worker(self, loop):
         asyncio.set_event_loop(loop)
-        loop.run_until_complete(self.client.connect())
-        loop.run_forever()
+        try:
+            loop.run_until_complete(self.client.connect())
+        except Exception as e:
+            if self.running:
+                print(f"Network worker error: {e}")
+        finally:
+            try:
+                loop.run_forever()
+            except:
+                pass
 
     def _audio_callback(self, indata, frames, time_info, status):
+        if not self.running:
+            return
         try:
             self.queue.put_nowait(indata.copy())
         except queue.Full:
@@ -87,13 +124,18 @@ class SmartAudioTranscriber:
         while self.running and retry_count < max_retries:
             try:
                 self._run_audio_stream(samples_per_chunk)
+                break  # Clean exit
             except sd.PortAudioError as e:
+                if not self.running:
+                    break
                 retry_count += 1
                 print(f"⚠️ Audio error (attempt {retry_count}/{max_retries}): {e}")
                 if retry_count < max_retries:
                     print(f"   Retrying in 2 seconds...")
                     time.sleep(2.0)
             except Exception as e:
+                if not self.running:
+                    break
                 print(f"❌ Critical Audio Error: {e}")
                 import traceback
                 traceback.print_exc()
@@ -111,7 +153,7 @@ class SmartAudioTranscriber:
             blocksize=samples_per_chunk,
             dtype='int16',
             latency='low'
-        ):
+        ) as stream:
             print(f"✅ OpenAI Audio Stream Active")
             audio_buffer = np.array([], dtype=np.int16)
             send_interval = 0.1
@@ -139,16 +181,15 @@ class SmartAudioTranscriber:
                     resampled = self._resample(float_audio, self.input_rate, self.target_rate)
                     pcm_bytes = (resampled * 32767).astype(np.int16).tobytes()
                     
-                    # Safely schedule the async send on the event loop
-                    if self.loop and self.loop.is_running() and len(pcm_bytes) > 0:
+                    if self.loop and self.loop.is_running() and len(pcm_bytes) > 0 and self.running:
                         try:
-                            # send_audio_chunk is now an async method, so this is correct
                             asyncio.run_coroutine_threadsafe(
                                 self.client.send_audio_chunk(pcm_bytes), 
                                 self.loop
                             )
                         except Exception as e:
-                            print(f"⚠️ Failed to schedule audio send: {e}")
+                            if self.running:
+                                print(f"⚠️ Failed to schedule audio send: {e}")
                     
                     last_send = current_time
                 
@@ -156,3 +197,5 @@ class SmartAudioTranscriber:
                 if len(audio_buffer) > max_samples:
                     audio_buffer = audio_buffer[-samples_per_chunk * 10:]
                 time.sleep(0.02)
+        
+        print("    Audio stream closed.")

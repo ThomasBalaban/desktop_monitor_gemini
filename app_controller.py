@@ -23,6 +23,10 @@ class AppController:
         self.config = ConfigLoader()
         print("Gemini Screen Watcher (Unified Vision+Audio) - Starting up...")
         
+        # Track if we're shutting down to prevent duplicate cleanup
+        self._shutting_down = False
+        self._shutdown_lock = threading.Lock()
+        
         # 1. Initialize Screen Capture
         self.screen_capture = ScreenCapture(
             self.config.image_quality, 
@@ -105,34 +109,74 @@ class AppController:
         try:
             self.gui.run()
         finally:
-            self.stop() # Ensure all services stop if gui.run exits
+            self.stop()
 
     def stop(self):
         """Unified shutdown logic to stop all threads and clean up resources."""
-        print("🛑 Shutting down services...")
+        with self._shutdown_lock:
+            if self._shutting_down:
+                return
+            self._shutting_down = True
         
-        # Stop polling loops
+        print("\n" + "="*50)
+        print("🛑 VISION APP SHUTDOWN INITIATED")
+        print("="*50)
+        
+        # 1. Stop polling loops first
+        print("  [1/6] Stopping polling loops...")
         self.mic_polling_active = False
         
-        # Stop background managers/services
-        self.streaming_manager.stop_streaming()
+        # 2. Stop streaming manager (stops sending frames to Gemini)
+        print("  [2/6] Stopping Gemini streaming...")
+        try:
+            self.streaming_manager.stop_streaming()
+        except Exception as e:
+            print(f"    ⚠️ Streaming manager error: {e}")
         
-        if hasattr(self, 'mic_transcriber'):
-            # Signal the actual audio capture loop to stop
-            self.mic_transcriber.stop_event.set() 
+        # 3. Stop microphone transcriber (Parakeet)
+        print("  [3/6] Stopping Parakeet microphone transcriber...")
+        try:
+            if hasattr(self, 'mic_transcriber'):
+                self.mic_transcriber.stop_event.set()
+                time.sleep(0.2)  # Give it a moment to stop
+        except Exception as e:
+            print(f"    ⚠️ Mic transcriber error: {e}")
             
-        if self.smart_transcriber:
-            self.smart_transcriber.stop()
+        # 4. Stop OpenAI Realtime / Smart Transcriber (Whisper)
+        print("  [4/6] Stopping OpenAI Whisper transcriber...")
+        try:
+            if self.smart_transcriber:
+                self.smart_transcriber.stop()
+        except Exception as e:
+            print(f"    ⚠️ Smart transcriber error: {e}")
             
-        self.websocket_server.stop()
+        # 5. Stop WebSocket server
+        print("  [5/6] Stopping WebSocket server...")
+        try:
+            self.websocket_server.stop()
+        except Exception as e:
+            print(f"    ⚠️ WebSocket server error: {e}")
+        
+        # 6. Release screen capture resources
+        print("  [6/6] Releasing screen capture...")
+        try:
+            if hasattr(self, 'screen_capture'):
+                self.screen_capture.release()
+        except Exception as e:
+            print(f"    ⚠️ Screen capture error: {e}")
         
         # Kill GUI if still alive
+        print("  Closing GUI...")
         try:
-            if self.gui.root.winfo_exists():
+            if self.gui and self.gui.root.winfo_exists():
                 self.gui.root.quit()
                 self.gui.root.destroy()
-        except:
-            pass
+        except Exception as e:
+            pass  # GUI might already be gone
+        
+        print("="*50)
+        print("✅ VISION APP SHUTDOWN COMPLETE")
+        print("="*50 + "\n")
 
     def _poll_mic_transcripts(self):
         print("🎤 Microphone transcript polling started...")
@@ -143,7 +187,6 @@ class AppController:
                 if text and len(text.strip()) > 0:
                     print(f"🎙️ [Mic/Parakeet]: {text}")
                     self.streaming_manager.add_transcript(f"[USER]: {text}")
-                    # UPDATED: Changed 'raw_transcript' to 'transcript' for Director Engine
                     self.websocket_server.broadcast({
                         "type": "transcript",
                         "source": "microphone",
@@ -154,14 +197,14 @@ class AppController:
             except Empty:
                 continue
             except Exception as e:
-                print(f"❌ Mic polling error: {e}")
+                if self.mic_polling_active:  # Only log if we're not shutting down
+                    print(f"❌ Mic polling error: {e}")
                 time.sleep(0.1)
         print("🎤 Microphone transcript polling stopped.")
 
     def _handle_whisper_transcript(self, transcript):
         print(f"🔊 [Desktop/Whisper]: {transcript}")
         self.streaming_manager.add_transcript(f"[AUDIO]: {transcript}")
-        # UPDATED: Changed 'raw_transcript' to 'transcript' and source to 'desktop'
         self.websocket_server.broadcast({
             "type": "transcript",
             "source": "desktop",
@@ -171,15 +214,16 @@ class AppController:
 
     def _on_openai_error(self, error_msg):
         print(f"❌ OpenAI Error: {error_msg}")
-        self.gui.add_error(f"OpenAI Error: {error_msg}")
+        if hasattr(self, 'gui') and self.gui:
+            self.gui.add_error(f"OpenAI Error: {error_msg}")
 
     def _on_gemini_response(self, text_chunk):
         self.current_response_buffer += text_chunk
         if self.current_response_buffer.strip().endswith(('.', '!', '?', '"', '\n')):
             final_text = self.current_response_buffer.strip()
-            self.gui.add_response(final_text)
+            if hasattr(self, 'gui') and self.gui:
+                self.gui.add_response(final_text)
             print(f"🎭 [SCREEN]: {final_text}")
-            # UPDATED: Changed 'screen_analysis' to 'text_update' and field 'content'
             self.websocket_server.broadcast({
                 "type": "text_update",
                 "timestamp": datetime.now().isoformat(),
@@ -188,10 +232,12 @@ class AppController:
             self.current_response_buffer = ""
 
     def _on_gemini_error(self, error_message):
-        self.gui.add_error(f"Gemini API Error: {error_message}")
+        if hasattr(self, 'gui') and self.gui:
+            self.gui.add_error(f"Gemini API Error: {error_message}")
 
     def _on_streaming_error(self, error_message):
-        self.gui.add_error(f"Streaming Error: {error_message}")
+        if hasattr(self, 'gui') and self.gui:
+            self.gui.add_error(f"Streaming Error: {error_message}")
 
     def request_analysis(self):
         print("Manual analysis triggered.")
