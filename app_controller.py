@@ -211,7 +211,7 @@ class AppController:
                 text, filename, source, confidence = self.mic_transcriber.result_queue.get(timeout=0.1)
                 
                 if text and len(text.strip()) > 0:
-                    print(f"🎙️ [Mic/User]: {text}")
+                    # print(f"🎙️ [Mic/User]: {text}")
                     self.streaming_manager.add_transcript(f"[USER]: {text}")
                     
                     # Microphone is always the user - no enrichment needed
