@@ -29,7 +29,7 @@ class SmartAudioTranscriber:
         
         # ===== CHUNKED SENDING SETTINGS =====
         self.send_interval_seconds = 5.0  # Send every 5 seconds
-        self.db_threshold = -40  # Only send if audio is louder than -40dB
+        self.db_threshold = -35  # Only send if audio is louder than -40dB
         self.overlap_seconds = 0.5  # 500ms overlap to avoid cutting words
 
     def start(self):
@@ -248,8 +248,8 @@ class SmartAudioTranscriber:
                     audio_buffer = np.array([], dtype=np.float32)
                     last_send_time = current_time
                 
-                # Prevent buffer from growing too large (max 15 seconds)
-                max_samples = self.input_rate * 15
+                # Prevent buffer from growing too large (max 20 seconds)
+                max_samples = self.input_rate * 20
                 if len(audio_buffer) > max_samples:
                     # Keep the most recent audio
                     audio_buffer = audio_buffer[-samples_per_interval:]

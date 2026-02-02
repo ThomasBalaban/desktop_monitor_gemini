@@ -88,13 +88,26 @@ class OpenAIRealtimeClient:
             data = json.loads(message)
             event_type = data.get("type")
 
+            # --- DEBUG LOGGING ---
+            # Print any transcription-related event to see what's happening
+            if "transcription" in event_type:
+                print(f"📥 [DEBUG] OpenAI Event: {event_type}")
+                if "failed" in event_type:
+                    print(f"❌ [DEBUG] Transcription FAILED: {data}")
+            # ---------------------
+
             if event_type == "conversation.item.input_audio_transcription.completed":
                 text = data.get("transcript", "")
+                print(f"📥 [DEBUG] Raw Transcript Received: '{text}'") # See what came in
+
                 if text and text.strip():
                     # Filter out non-English or garbage text
                     cleaned = self._filter_transcript(text.strip())
                     if cleaned:
+                        print(f"✅ [DEBUG] Passing to App: '{cleaned}'")
                         self.on_transcript(cleaned)
+                    else:
+                        print(f"🚫 [DEBUG] Transcript was filtered out")
             
             elif event_type == "conversation.item.input_audio_transcription.delta":
                 pass  # Ignore partial transcripts
@@ -116,15 +129,6 @@ class OpenAIRealtimeClient:
                 err_code = err.get("code", "unknown")
                 print(f"❌ OpenAI API Error [{err_code}]: {err_msg}")
                 self.on_error(f"API Error: {err_msg}")
-                
-            # elif event_type == "input_audio_buffer.speech_started":
-                # print("🎤 Speech detected")
-                
-            # elif event_type == "input_audio_buffer.speech_stopped":
-                # print("🎤 Speech ended")
-                
-            # elif event_type == "input_audio_buffer.committed":
-                # print("📝 Audio committed for transcription")
 
         except Exception as e:
             print(f"Message Parse Error: {e}")
@@ -147,7 +151,7 @@ class OpenAIRealtimeClient:
             ascii_ratio = ascii_chars / total_chars
             # If less than 70% ASCII, it's probably not English
             if ascii_ratio < 0.7:
-                print(f"🚫 Filtered non-English: {text}")
+                print(f"🚫 Filtered non-English (Ratio {ascii_ratio:.2f}): {text}")
                 return None
         
         # Filter out very short garbage (less than 2 actual words)
@@ -155,11 +159,11 @@ class OpenAIRealtimeClient:
         if len(words) < 2:
             # Unless it's a common short phrase
             if text.lower() not in ["yes", "no", "ok", "okay", "yeah", "hey", "hi", "bye", "what", "why", "how", "oh", "ah"]:
-                print(f"🚫 Filtered too short: {text}")
+                print(f"🚫 Filtered too short: '{text}'")
                 return None
         
         return text
-
+    
     async def send_audio_chunk(self, audio_bytes):
         """
         Send audio chunk and immediately commit it for transcription.
