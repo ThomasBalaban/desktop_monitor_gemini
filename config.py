@@ -9,6 +9,7 @@ DEBUG_MODE = False
 
 # --- Audio Configuration ---
 DESKTOP_AUDIO_DEVICE_ID = 2
+MICROPHONE_DEVICE_ID = 3
 AUDIO_SAMPLE_RATE = 16000
 
 # --- Vision Configuration ---
@@ -74,7 +75,6 @@ OVERLAP = 1.5
 MAX_THREADS = 4
 SAVE_DIR = "audio_captures"
 DESKTOP_DEVICE_ID = 2
-MICROPHONE_DEVICE_ID = 3
 MODEL_SIZE = "base.en"
 DEVICE = "cpu"
 COMPUTE_TYPE = "int8"

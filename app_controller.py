@@ -14,6 +14,7 @@ from app_gui import AppGUI
 from websocket_server import WebSocketServer, WEBSOCKET_PORT
 from transcriber_core.microphone import MicrophoneTranscriber
 from transcriber_core.config import MICROPHONE_DEVICE_ID, DESKTOP_DEVICE_ID 
+from config import MICROPHONE_DEVICE_ID, DESKTOP_AUDIO_DEVICE_ID
 
 from openai_realtime_client import OpenAIRealtimeClient
 from transcriber_core.openai_streamer import SmartAudioTranscriber
@@ -29,7 +30,7 @@ class AppController:
         
         # Audio Device State
         self.current_mic_id = MICROPHONE_DEVICE_ID
-        self.current_desktop_id = self.config.audio_device_id # from config.py
+        self.current_desktop_id = DESKTOP_AUDIO_DEVICE_ID
         
         # 1. Initialize Screen Capture
         self.screen_capture = ScreenCapture(
