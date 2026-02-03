@@ -14,7 +14,7 @@ class OpenAIRealtimeClient:
         self._closing = False
         
         # Realtime API Config
-        self.url = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2025-06-03"
+        self.url = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01"
 
     async def connect(self):
         """
@@ -95,22 +95,17 @@ class OpenAIRealtimeClient:
 
             # --- DEBUG LOGGING ---
             if "transcription" in event_type:
-                print(f"📥 [DEBUG] OpenAI Event: {event_type}")
                 if "failed" in event_type:
                     print(f"❌ [DEBUG] Transcription FAILED: {data}")
             # ---------------------
 
             if event_type == "conversation.item.input_audio_transcription.completed":
                 text = data.get("transcript", "")
-                print(f"📥 [DEBUG] Raw Transcript Received: '{text}'")
 
                 if text and text.strip():
                     cleaned = self._filter_transcript(text.strip())
                     if cleaned:
-                        print(f"✅ [DEBUG] Passing to App: '{cleaned}'")
                         self.on_transcript(cleaned)
-                    else:
-                        print(f"🚫 [DEBUG] Transcript was filtered out")
             
             elif event_type == "conversation.item.input_audio_transcription.delta":
                 pass  # Ignore partial transcripts
@@ -164,14 +159,7 @@ class OpenAIRealtimeClient:
             if ascii_ratio < 0.7:
                 print(f"🚫 Filtered non-English (Ratio {ascii_ratio:.2f}): {text}")
                 return None
-        
-        # Filter out very short garbage (less than 2 actual words)
-        words = [w for w in text.split() if len(w) > 1]
-        if len(words) < 2:
-            if text.lower() not in ["yes", "no", "ok", "okay", "yeah", "hey", "hi", "bye", "what", "why", "how", "oh", "ah"]:
-                print(f"🚫 Filtered too short: '{text}'")
-                return None
-        
+            
         return text
     
     async def send_audio_chunk(self, audio_bytes):

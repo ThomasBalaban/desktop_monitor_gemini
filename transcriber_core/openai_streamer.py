@@ -25,14 +25,14 @@ class SmartAudioTranscriber:
         self.loop = None
         
         # Audio Settings
-        self.gain = 2.0
+        self.gain = 1.5
         self.remove_dc = True
         
         # Streaming settings - send audio frequently, let server VAD handle commits
         self.chunk_duration_ms = 100  # Send small chunks frequently
         
         # Only filter out extremely quiet audio (let VAD do the real filtering)
-        self.db_threshold = -40  # Very low threshold, just to filter dead silence
+        self.db_threshold = -30  # Very low threshold, just to filter dead silence
 
     def set_volume_callback(self, callback):
         """Register callback for GUI volume updates"""
@@ -171,7 +171,7 @@ class SmartAudioTranscriber:
             # Small buffer to smooth out audio chunks
             audio_buffer = np.array([], dtype=np.float32)
             
-            send_interval = 0.4
+            send_interval = 1.2
             last_send_time = time.time()
             min_samples_to_send = int(self.input_rate * send_interval)
             
