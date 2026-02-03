@@ -14,7 +14,7 @@ class OpenAIRealtimeClient:
         self._closing = False
         
         # Realtime API Config
-        self.url = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01"
+        self.url = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2025-06-03"
 
     async def connect(self):
         """
@@ -64,7 +64,7 @@ class OpenAIRealtimeClient:
             self.ws = None
 
     async def _send_session_update(self):
-        """Configure session with VAD DISABLED and ENGLISH ONLY."""
+        """Configure session with SERVER VAD ENABLED for automatic speech detection."""
         if not self.ws: return
         
         session_update = {
@@ -74,14 +74,19 @@ class OpenAIRealtimeClient:
                 "input_audio_format": "pcm16",
                 "input_audio_transcription": {
                     "model": "whisper-1",
-                    "language": "en"  # ENGLISH ONLY
+                    "language": "en"
                 },
-                # VAD DISABLED - we control when to send audio chunks
-                "turn_detection": None
+                # SERVER VAD - OpenAI automatically detects speech and commits
+                "turn_detection": {
+                    "type": "server_vad",
+                    "threshold": 0.45,  # Lower = more sensitive to speech
+                    "prefix_padding_ms": 500,  # Audio to include before speech
+                    "silence_duration_ms": 1500  # How long silence before committing
+                }
             }
         }
         await self.ws.send(json.dumps(session_update))
-        print("📤 Sent session config (VAD DISABLED, English only, 5s chunks)")
+        print("📤 Sent session config (Server VAD ENABLED, English only)")
 
     async def _handle_message(self, message):
         try:
@@ -89,7 +94,6 @@ class OpenAIRealtimeClient:
             event_type = data.get("type")
 
             # --- DEBUG LOGGING ---
-            # Print any transcription-related event to see what's happening
             if "transcription" in event_type:
                 print(f"📥 [DEBUG] OpenAI Event: {event_type}")
                 if "failed" in event_type:
@@ -98,10 +102,9 @@ class OpenAIRealtimeClient:
 
             if event_type == "conversation.item.input_audio_transcription.completed":
                 text = data.get("transcript", "")
-                print(f"📥 [DEBUG] Raw Transcript Received: '{text}'") # See what came in
+                print(f"📥 [DEBUG] Raw Transcript Received: '{text}'")
 
                 if text and text.strip():
-                    # Filter out non-English or garbage text
                     cleaned = self._filter_transcript(text.strip())
                     if cleaned:
                         print(f"✅ [DEBUG] Passing to App: '{cleaned}'")
@@ -121,7 +124,16 @@ class OpenAIRealtimeClient:
                 print("✅ OpenAI Realtime session created")
                 
             elif event_type == "session.updated":
-                print("✅ OpenAI Realtime session configured - English only, 5s chunks!")
+                print("✅ OpenAI Realtime session configured - Server VAD enabled!")
+                
+            elif event_type == "input_audio_buffer.speech_started":
+                print("🎤 [VAD] Speech detected...")
+                
+            elif event_type == "input_audio_buffer.speech_stopped":
+                print("🎤 [VAD] Speech ended, transcribing...")
+                
+            elif event_type == "input_audio_buffer.committed":
+                print("📝 [VAD] Audio buffer committed for transcription")
                 
             elif event_type == "error":
                 err = data.get("error", {})
@@ -149,7 +161,6 @@ class OpenAIRealtimeClient:
         
         if total_chars > 0:
             ascii_ratio = ascii_chars / total_chars
-            # If less than 70% ASCII, it's probably not English
             if ascii_ratio < 0.7:
                 print(f"🚫 Filtered non-English (Ratio {ascii_ratio:.2f}): {text}")
                 return None
@@ -157,7 +168,6 @@ class OpenAIRealtimeClient:
         # Filter out very short garbage (less than 2 actual words)
         words = [w for w in text.split() if len(w) > 1]
         if len(words) < 2:
-            # Unless it's a common short phrase
             if text.lower() not in ["yes", "no", "ok", "okay", "yeah", "hey", "hi", "bye", "what", "why", "how", "oh", "ah"]:
                 print(f"🚫 Filtered too short: '{text}'")
                 return None
@@ -166,24 +176,17 @@ class OpenAIRealtimeClient:
     
     async def send_audio_chunk(self, audio_bytes):
         """
-        Send audio chunk and immediately commit it for transcription.
-        With VAD disabled, we must manually commit each chunk.
+        Send audio chunk to OpenAI. With server VAD enabled, 
+        we just append audio - the server decides when to transcribe.
         """
         if self.ws and not self._closing:
             try:
-                # 1. Append audio to buffer
                 encoded = base64.b64encode(audio_bytes).decode("utf-8")
                 append_event = {
                     "type": "input_audio_buffer.append",
                     "audio": encoded
                 }
                 await self.ws.send(json.dumps(append_event))
-                
-                # 2. Commit the buffer to trigger transcription
-                commit_event = {
-                    "type": "input_audio_buffer.commit"
-                }
-                await self.ws.send(json.dumps(commit_event))
                 
             except Exception as e:
                 if not self._closing:

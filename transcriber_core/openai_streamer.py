@@ -7,7 +7,7 @@ import queue
 import time
 
 class SmartAudioTranscriber:
-    """Streams desktop audio to OpenAI with volume monitoring and chunked sending."""
+    """Streams desktop audio to OpenAI with server-side VAD handling transcription."""
     def __init__(self, client, device_id):
         self.client = client
         self.device_id = device_id
@@ -16,7 +16,7 @@ class SmartAudioTranscriber:
         self.queue = queue.Queue(maxsize=500)
         self.running = False
         
-        # New: volume monitoring callback
+        # Volume monitoring callback
         self.volume_callback = None
         
         # Threads
@@ -25,17 +25,14 @@ class SmartAudioTranscriber:
         self.loop = None
         
         # Audio Settings
-        self.gain = 5.0
+        self.gain = 2.0
         self.remove_dc = True
         
-        # Streaming settings
-        self.chunk_duration_ms = 100 
+        # Streaming settings - send audio frequently, let server VAD handle commits
+        self.chunk_duration_ms = 100  # Send small chunks frequently
         
-        # ===== CHUNKED SENDING SETTINGS =====
-        # FIX: Increased to 15s to stay under OpenAI transcription rate limits
-        self.send_interval_seconds = 15.0  
-        self.db_threshold = -35 
-        self.overlap_seconds = 0.5 
+        # Only filter out extremely quiet audio (let VAD do the real filtering)
+        self.db_threshold = -40  # Very low threshold, just to filter dead silence
 
     def set_volume_callback(self, callback):
         """Register callback for GUI volume updates"""
@@ -145,7 +142,7 @@ class SmartAudioTranscriber:
             device_name = f"Device {self.device_id}"
             
         print(f"🎧 OpenAI Audio: {device_name}")
-        print(f"   Rate: {self.input_rate}Hz → {self.target_rate}Hz | Interval: {self.send_interval_seconds}s")
+        print(f"   Rate: {self.input_rate}Hz → {self.target_rate}Hz | Server VAD enabled")
 
         time.sleep(2.0)
         samples_per_chunk = int(self.input_rate * self.chunk_duration_ms / 1000)
@@ -169,38 +166,56 @@ class SmartAudioTranscriber:
             callback=self._audio_callback, blocksize=samples_per_chunk,
             dtype='int16', latency='low'
         ) as stream:
-            print(f"✅ OpenAI Audio Stream Active")
+            print(f"✅ OpenAI Audio Stream Active (Server VAD mode)")
             
+            # Small buffer to smooth out audio chunks
             audio_buffer = np.array([], dtype=np.float32)
-            overlap_buffer = np.array([], dtype=np.float32)
             
+            send_interval = 0.4
             last_send_time = time.time()
-            samples_per_interval = int(self.input_rate * self.send_interval_seconds)
-            samples_per_overlap = int(self.input_rate * self.overlap_seconds)
+            min_samples_to_send = int(self.input_rate * send_interval)
             
             while self.running:
+                # Collect audio from queue
                 while not self.queue.empty():
                     try:
                         data = self.queue.get_nowait()
                         float_chunk = data.flatten().astype(np.float32) / 32768.0
                         audio_buffer = np.concatenate([audio_buffer, float_chunk])
-                    except queue.Empty: break
+                    except queue.Empty: 
+                        break
                 
                 current_time = time.time()
-                if current_time - last_send_time >= self.send_interval_seconds and len(audio_buffer) > 0:
-                    full_audio = np.concatenate([overlap_buffer, audio_buffer]) if len(overlap_buffer) > 0 else audio_buffer
+                
+                # Send audio at regular intervals
+                if current_time - last_send_time >= send_interval and len(audio_buffer) >= min_samples_to_send:
+                    # Process the audio
+                    audio_to_send = audio_buffer[:min_samples_to_send].copy()
+                    audio_buffer = audio_buffer[min_samples_to_send:]
                     
-                    if self.remove_dc: full_audio = full_audio - np.mean(full_audio)
-                    full_audio = np.clip(full_audio * self.gain, -1.0, 1.0)
+                    # Basic preprocessing
+                    if self.remove_dc:
+                        audio_to_send = audio_to_send - np.mean(audio_to_send)
+                    audio_to_send = np.clip(audio_to_send * self.gain, -1.0, 1.0)
                     
-                    if self._calculate_db(full_audio) >= self.db_threshold:
-                        resampled = self._resample(full_audio, self.input_rate, self.target_rate)
+                    # Only skip completely dead silence
+                    db_level = self._calculate_db(audio_to_send)
+                    if db_level >= self.db_threshold:
+                        # Resample to 24kHz for OpenAI
+                        resampled = self._resample(audio_to_send, self.input_rate, self.target_rate)
                         pcm_bytes = (resampled * 32767).astype(np.int16).tobytes()
+                        
                         if self.loop and self.loop.is_running():
-                            asyncio.run_coroutine_threadsafe(self.client.send_audio_chunk(pcm_bytes), self.loop)
+                            asyncio.run_coroutine_threadsafe(
+                                self.client.send_audio_chunk(pcm_bytes), 
+                                self.loop
+                            )
                     
-                    overlap_buffer = audio_buffer[-samples_per_overlap:].copy() if len(audio_buffer) > samples_per_overlap else audio_buffer.copy()
-                    audio_buffer = np.array([], dtype=np.float32)
                     last_send_time = current_time
+                
+                # Prevent buffer from growing too large
+                max_buffer = int(self.input_rate * 5)  # Max 5 seconds
+                if len(audio_buffer) > max_buffer:
+                    audio_buffer = audio_buffer[-max_buffer:]
                 
                 time.sleep(0.02)
