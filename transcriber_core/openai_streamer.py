@@ -7,6 +7,7 @@ import queue
 import time
 
 class SmartAudioTranscriber:
+    """Streams desktop audio to OpenAI with volume monitoring and chunked sending."""
     def __init__(self, client, device_id):
         self.client = client
         self.device_id = device_id
@@ -14,6 +15,9 @@ class SmartAudioTranscriber:
         self.target_rate = 24000
         self.queue = queue.Queue(maxsize=500)
         self.running = False
+        
+        # New: volume monitoring callback
+        self.volume_callback = None
         
         # Threads
         self.process_thread = None
@@ -25,12 +29,17 @@ class SmartAudioTranscriber:
         self.remove_dc = True
         
         # Streaming settings
-        self.chunk_duration_ms = 100  # Small chunks for capture
+        self.chunk_duration_ms = 100 
         
         # ===== CHUNKED SENDING SETTINGS =====
-        self.send_interval_seconds = 5.0  # Send every 5 seconds
-        self.db_threshold = -35  # Only send if audio is louder than -40dB
-        self.overlap_seconds = 0.5  # 500ms overlap to avoid cutting words
+        # FIX: Increased to 15s to stay under OpenAI transcription rate limits
+        self.send_interval_seconds = 15.0  
+        self.db_threshold = -35 
+        self.overlap_seconds = 0.5 
+
+    def set_volume_callback(self, callback):
+        """Register callback for GUI volume updates"""
+        self.volume_callback = callback
 
     def start(self):
         self.running = True
@@ -90,12 +99,20 @@ class SmartAudioTranscriber:
                 pass
 
     def _audio_callback(self, indata, frames, time_info, status):
+        """Audio callback with volume reporting."""
         if not self.running:
             return
+            
+        # Volume Calculation for GUI
+        float_data = indata.flatten().astype(np.float32) / 32768.0
+        rms_val = np.sqrt(np.mean(float_data**2))
+        
+        if self.volume_callback:
+            self.volume_callback(min(1.0, rms_val * 10))
+            
         try:
             self.queue.put_nowait(indata.copy())
         except queue.Full:
-            # Drop oldest if full
             try:
                 self.queue.get_nowait()
                 self.queue.put_nowait(indata.copy())
@@ -114,7 +131,7 @@ class SmartAudioTranscriber:
         if rms > 0:
             db = 20 * np.log10(rms)
         else:
-            db = -100  # Silence
+            db = -100 
         return db
 
     def _process_worker(self):
@@ -128,9 +145,7 @@ class SmartAudioTranscriber:
             device_name = f"Device {self.device_id}"
             
         print(f"🎧 OpenAI Audio: {device_name}")
-        print(f"   Rate: {self.input_rate}Hz → {self.target_rate}Hz | Gain: {self.gain}x")
-        print(f"   Mode: Chunked ({self.send_interval_seconds}s intervals, {self.db_threshold}dB threshold)")
-        print(f"   Overlap: {self.overlap_seconds}s buffer")
+        print(f"   Rate: {self.input_rate}Hz → {self.target_rate}Hz | Interval: {self.send_interval_seconds}s")
 
         time.sleep(2.0)
         samples_per_chunk = int(self.input_rate * self.chunk_duration_ms / 1000)
@@ -142,119 +157,50 @@ class SmartAudioTranscriber:
             try:
                 self._run_audio_stream(samples_per_chunk)
                 break
-            except sd.PortAudioError as e:
-                if not self.running:
-                    break
+            except Exception as e:
+                if not self.running: break
                 retry_count += 1
                 print(f"⚠️ Audio error (attempt {retry_count}/{max_retries}): {e}")
-                if retry_count < max_retries:
-                    print(f"   Retrying in 2 seconds...")
-                    time.sleep(2.0)
-            except Exception as e:
-                if not self.running:
-                    break
-                print(f"❌ Critical Audio Error: {e}")
-                import traceback
-                traceback.print_exc()
-                break
-        
-        if retry_count >= max_retries:
-            print(f"❌ Audio stream failed after {max_retries} attempts")
+                time.sleep(2.0)
 
     def _run_audio_stream(self, samples_per_chunk):
         with sd.InputStream(
-            device=self.device_id, 
-            channels=1, 
-            samplerate=self.input_rate, 
-            callback=self._audio_callback,
-            blocksize=samples_per_chunk,
-            dtype='int16',
-            latency='low'
+            device=self.device_id, channels=1, samplerate=self.input_rate, 
+            callback=self._audio_callback, blocksize=samples_per_chunk,
+            dtype='int16', latency='low'
         ) as stream:
             print(f"✅ OpenAI Audio Stream Active")
             
-            # Main audio buffer - accumulates audio for the full interval
             audio_buffer = np.array([], dtype=np.float32)
-            
-            # Overlap buffer - keeps the last bit of audio for continuity
             overlap_buffer = np.array([], dtype=np.float32)
             
-            # Timing
             last_send_time = time.time()
             samples_per_interval = int(self.input_rate * self.send_interval_seconds)
             samples_per_overlap = int(self.input_rate * self.overlap_seconds)
             
             while self.running:
-                # Collect audio from queue
-                chunks_collected = 0
-                while not self.queue.empty() and chunks_collected < 50:
+                while not self.queue.empty():
                     try:
                         data = self.queue.get_nowait()
-                        # Convert to float immediately
                         float_chunk = data.flatten().astype(np.float32) / 32768.0
                         audio_buffer = np.concatenate([audio_buffer, float_chunk])
-                        chunks_collected += 1
-                    except queue.Empty:
-                        break
+                    except queue.Empty: break
                 
                 current_time = time.time()
-                elapsed = current_time - last_send_time
-                
-                # Check if it's time to send (every 5 seconds)
-                if elapsed >= self.send_interval_seconds and len(audio_buffer) > 0:
-                    # Prepend overlap from previous chunk for continuity
-                    if len(overlap_buffer) > 0:
-                        full_audio = np.concatenate([overlap_buffer, audio_buffer])
-                    else:
-                        full_audio = audio_buffer
+                if current_time - last_send_time >= self.send_interval_seconds and len(audio_buffer) > 0:
+                    full_audio = np.concatenate([overlap_buffer, audio_buffer]) if len(overlap_buffer) > 0 else audio_buffer
                     
-                    # Apply processing
-                    if self.remove_dc:
-                        full_audio = full_audio - np.mean(full_audio)
-                    full_audio = full_audio * self.gain
-                    full_audio = np.clip(full_audio, -1.0, 1.0)
+                    if self.remove_dc: full_audio = full_audio - np.mean(full_audio)
+                    full_audio = np.clip(full_audio * self.gain, -1.0, 1.0)
                     
-                    # Calculate dB level
-                    db_level = self._calculate_db(full_audio)
-                    
-                    if db_level >= self.db_threshold:
-                        # Audio is loud enough - send it!
-                        # print(f"🔊 Sending {len(full_audio)/self.input_rate:.1f}s audio ({db_level:.1f}dB)")
-                        
-                        # Resample to target rate for OpenAI
+                    if self._calculate_db(full_audio) >= self.db_threshold:
                         resampled = self._resample(full_audio, self.input_rate, self.target_rate)
                         pcm_bytes = (resampled * 32767).astype(np.int16).tobytes()
-                        
-                        if self.loop and self.loop.is_running() and len(pcm_bytes) > 0:
-                            try:
-                                asyncio.run_coroutine_threadsafe(
-                                    self.client.send_audio_chunk(pcm_bytes), 
-                                    self.loop
-                                )
-                            except Exception as e:
-                                if self.running:
-                                    print(f"⚠️ Failed to send audio: {e}")
-                    # else:
-                        # Too quiet - skip
-                        # print(f"🔇 Skipping chunk ({db_level:.1f}dB < {self.db_threshold}dB)")
+                        if self.loop and self.loop.is_running():
+                            asyncio.run_coroutine_threadsafe(self.client.send_audio_chunk(pcm_bytes), self.loop)
                     
-                    # Save overlap for next chunk (last 0.5s of current buffer)
-                    if len(audio_buffer) > samples_per_overlap:
-                        overlap_buffer = audio_buffer[-samples_per_overlap:].copy()
-                    else:
-                        overlap_buffer = audio_buffer.copy()
-                    
-                    # Clear main buffer
+                    overlap_buffer = audio_buffer[-samples_per_overlap:].copy() if len(audio_buffer) > samples_per_overlap else audio_buffer.copy()
                     audio_buffer = np.array([], dtype=np.float32)
                     last_send_time = current_time
                 
-                # Prevent buffer from growing too large (max 20 seconds)
-                max_samples = self.input_rate * 20
-                if len(audio_buffer) > max_samples:
-                    # Keep the most recent audio
-                    audio_buffer = audio_buffer[-samples_per_interval:]
-                    print("⚠️ Buffer overflow, trimming...")
-                
-                time.sleep(0.02)  # Small sleep to prevent CPU spin
-        
-        print("    Audio stream closed.")
+                time.sleep(0.02)

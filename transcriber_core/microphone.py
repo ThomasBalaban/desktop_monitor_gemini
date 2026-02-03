@@ -33,14 +33,11 @@ class MicrophoneTranscriber:
         try:
             self.model = parakeet_mlx.from_pretrained("mlx-community/parakeet-tdt-0.6b-v2")
         except Exception as e:
-            print(f"❌ Error initializing: {e}")
+            print(f"❌ Error initializing model: {e}")
             raise
 
         self.result_queue = Queue()
-        
-        # Instance-level stop event for hot-reloading
         self.stop_event = Event()
-        
         self.saved_files = []
         self.keep_files = keep_files
         self.active_threads = 0
@@ -56,6 +53,9 @@ class MicrophoneTranscriber:
 
         self.transcript_manager = transcript_manager
         
+        # New: Volume monitoring
+        self.volume_callback = None
+        
         # Name Correction
         self.name_variations = {
             r'\bnaomi\b': 'Nami', r'\bnow may\b': 'Nami', r'\bnomi\b': 'Nami',
@@ -65,23 +65,25 @@ class MicrophoneTranscriber:
             r'\bpeepingnaomi\b': 'PeepingNami', r'\bpeepingnomi\b': 'PeepingNami'
         }
 
+    def set_volume_callback(self, callback):
+        """Register callback for GUI volume updates"""
+        self.volume_callback = callback
+
     def stop(self):
         """Signals the run loop to stop."""
         self.stop_event.set()
 
     def audio_callback(self, indata, frames, timestamp, status):
-        """Analyzes audio for speech, buffers it, and sends complete utterances for transcription."""
-        if status:
-            if status.input_overflow:
-                print("[MIC-WARN] Input overflow detected, clearing buffer.", file=sys.stderr)
-                with self.buffer_lock:
-                    self.speech_buffer = np.array([], dtype=np.float32)
-
+        """Analyzes audio for speech, calculates volume, and buffers it."""
         if self.stop_event.is_set():
             return
 
         new_audio = indata.flatten().astype(np.float32)
         rms_amplitude = np.sqrt(np.mean(new_audio**2))
+
+        # Update GUI volume meter (scaled for visual impact)
+        if self.volume_callback:
+            self.volume_callback(min(1.0, rms_amplitude * 10))
 
         with self.buffer_lock:
             if rms_amplitude > VAD_ENERGY_THRESHOLD:
@@ -182,14 +184,3 @@ class MicrophoneTranscriber:
         finally:
             self.stop_event.set()
             print(f"🎤 Microphone listener (Device {self.device_id}) stopped.")
-
-# Legacy support wrapper
-def transcribe_microphone():
-    try:
-        transcriber = MicrophoneTranscriber()
-        transcriber.run()
-    except Exception as e:
-        print(f"Critical error: {e}")
-
-if __name__ == "__main__":
-    transcribe_microphone()

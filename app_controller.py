@@ -51,6 +51,8 @@ class AppController:
         
         # 3. Initialize Parakeet Microphone Transcriber
         self.mic_transcriber = MicrophoneTranscriber(keep_files=False, device_id=self.current_mic_id)
+        # Link volume callback to GUI
+        self.mic_transcriber.set_volume_callback(lambda level: self.gui.set_volume_meter("mic", level))
         self.mic_polling_active = True 
         
         # 4. Streaming Manager
@@ -88,6 +90,8 @@ class AppController:
                 self.openai_client, 
                 device_id=self.current_desktop_id
             )
+            # Link volume callback to GUI
+            self.smart_transcriber.set_volume_callback(lambda level: self.gui.set_volume_meter("desktop", level))
             
             self.transcript_enricher = TranscriptEnricher(
                 api_key=self.config.openai_api_key,
@@ -102,8 +106,6 @@ class AppController:
             
         self.gui.root.after(2000, self._start_stream_on_init)
 
-    # --- NEW: Audio Device Management ---
-    
     def refresh_audio_devices(self):
         """Query devices and update GUI lists"""
         try:
@@ -114,13 +116,10 @@ class AppController:
             for i, dev in enumerate(devices):
                 name = f"{i}: {dev['name']}"
                 inputs = dev['max_input_channels']
-                # Categorize
                 if inputs > 0:
                     mic_list.append(name)
-                    # Loopback devices are also inputs, so add to desktop list too
                     desktop_list.append(name)
             
-            print(f"🔄 Refreshed audio devices: {len(mic_list)} inputs found.")
             self.gui.set_device_lists(mic_list, desktop_list, self.current_mic_id, self.current_desktop_id)
             
         except Exception as e:
@@ -132,7 +131,6 @@ class AppController:
         if not selection: return
         
         try:
-            # Extract ID from "2: Microphone Name"
             new_id = int(selection.split(":")[0])
             if new_id == self.current_mic_id: return
             
@@ -159,14 +157,12 @@ class AppController:
 
     def _restart_mic_transcriber(self):
         """Stops and restarts the microphone transcriber with new ID"""
-        # Stop existing
         if self.mic_transcriber:
             self.mic_transcriber.stop()
-            # Wait briefly? The thread will exit naturally.
         
-        # Create new
         self.mic_transcriber = MicrophoneTranscriber(keep_files=False, device_id=self.current_mic_id)
-        # Start thread
+        # Re-link the volume callback
+        self.mic_transcriber.set_volume_callback(lambda level: self.gui.set_volume_meter("mic", level))
         threading.Thread(target=self.mic_transcriber.run, daemon=True).start()
         print("✅ Mic transcriber restarted.")
 
@@ -176,15 +172,14 @@ class AppController:
         
         self.smart_transcriber.stop()
         
-        # Create new instance (OpenAI client can be reused)
         self.smart_transcriber = SmartAudioTranscriber(
             self.openai_client, 
             device_id=self.current_desktop_id
         )
+        # Re-link the volume callback
+        self.smart_transcriber.set_volume_callback(lambda level: self.gui.set_volume_meter("desktop", level))
         self.smart_transcriber.start()
         print("✅ Desktop audio streamer restarted.")
-
-    # ------------------------------------
 
     def gui_update_wrapper(self, frame):
         if self.gui:
@@ -363,10 +358,12 @@ class AppController:
             self.gui.add_error(f"API Connection Check Failed: {message}")
             self.gui.update_status("API Check Failed", "red")
             return
+        
         print("API connection successful. Starting streaming...")
         self.streaming_manager.set_status_callback(self.gui.update_status)
         self.streaming_manager.start_streaming()
-        self.gui.update_status("Connecting...", "orange")
+        # FIX: Transition status to 'Streaming' once checks pass
+        self.gui.update_status("Streaming", "#4CAF50")
 
     def update_websocket_gui_status(self):
         self.gui.update_websocket_status(f"Running at ws://localhost:{WEBSOCKET_PORT}", "#4CAF50")

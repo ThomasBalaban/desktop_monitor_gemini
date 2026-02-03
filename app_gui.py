@@ -7,7 +7,7 @@ class AppGUI:
         self.controller = controller
         self.root = tk.Tk()
         self.root.title("Gemini 2.0 Unified Monitor")
-        self.root.geometry("1000x950") # Slightly taller for settings
+        self.root.geometry("1000x950") 
         self.root.configure(bg="#2E2E2E")
         self.default_font = font.nametofont("TkDefaultFont")
         self.default_font.configure(family="Helvetica", size=11)
@@ -25,23 +25,31 @@ class AppGUI:
                                      relief=tk.FLAT, padx=10)
         self.btn_analyze.pack(side=tk.RIGHT)
 
-        # --- Audio Settings Frame (NEW) ---
+        # --- Audio Settings Frame ---
         settings_frame = tk.Frame(self.root, bg="#3E3E3E", padx=10, pady=5)
         settings_frame.pack(fill=tk.X, padx=10, pady=(0, 5))
         
-        # Mic Selection
+        # Mic Selection & Volume Meter
         tk.Label(settings_frame, text="🎤 Mic:", bg="#3E3E3E", fg="white").pack(side=tk.LEFT, padx=(0, 5))
         self.mic_var = tk.StringVar()
-        self.combo_mic = ttk.Combobox(settings_frame, textvariable=self.mic_var, state="readonly", width=30)
-        self.combo_mic.pack(side=tk.LEFT, padx=(0, 10))
+        self.combo_mic = ttk.Combobox(settings_frame, textvariable=self.mic_var, state="readonly", width=25)
+        self.combo_mic.pack(side=tk.LEFT, padx=(0, 5))
         self.combo_mic.bind("<<ComboboxSelected>>", self.controller.on_mic_changed)
+        
+        self.mic_meter = tk.Canvas(settings_frame, width=60, height=15, bg="#1E1E1E", highlightthickness=0)
+        self.mic_meter.pack(side=tk.LEFT, padx=(0, 15))
+        self.mic_bar = self.mic_meter.create_rectangle(0, 0, 0, 15, fill="#4CAF50")
 
-        # Desktop Selection
+        # Desktop Selection & Volume Meter
         tk.Label(settings_frame, text="🔊 Desktop:", bg="#3E3E3E", fg="white").pack(side=tk.LEFT, padx=(0, 5))
         self.desktop_var = tk.StringVar()
-        self.combo_desktop = ttk.Combobox(settings_frame, textvariable=self.desktop_var, state="readonly", width=30)
-        self.combo_desktop.pack(side=tk.LEFT, padx=(0, 10))
+        self.combo_desktop = ttk.Combobox(settings_frame, textvariable=self.desktop_var, state="readonly", width=25)
+        self.combo_desktop.pack(side=tk.LEFT, padx=(0, 5))
         self.combo_desktop.bind("<<ComboboxSelected>>", self.controller.on_desktop_changed)
+
+        self.desktop_meter = tk.Canvas(settings_frame, width=60, height=15, bg="#1E1E1E", highlightthickness=0)
+        self.desktop_meter.pack(side=tk.LEFT, padx=(0, 15))
+        self.desktop_bar = self.desktop_meter.create_rectangle(0, 0, 0, 15, fill="#2196F3")
 
         # Refresh Button
         self.btn_refresh = tk.Button(settings_frame, text="🔄 Refresh", 
@@ -67,7 +75,7 @@ class AppGUI:
         feed_label.grid(row=0, column=0, sticky="w", pady=(10, 5))
         
         self.feed_text = scrolledtext.ScrolledText(main_frame, wrap=tk.WORD, state=tk.DISABLED, bg="#1E1E1E", fg="#E0E0E0", font=("Helvetica", 12))
-        self.feed_text.grid(row=1, column=0, sticky="nsew", padx=(0, 0))
+        self.feed_text.grid(row=1, column=0, sticky="nsew")
         
         self.error_text = scrolledtext.ScrolledText(main_frame, wrap=tk.WORD, state=tk.DISABLED, bg="#1E1E1E", fg="#FF7B7B", height=5)
         self.error_text.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
@@ -80,6 +88,15 @@ class AppGUI:
         self.status_label.pack(side=tk.LEFT)
         self.websocket_status_label = tk.Label(status_frame, text="WebSocket: Inactive", bg="#1E1E1E", fg="#FFFFFF")
         self.websocket_status_label.pack(side=tk.RIGHT)
+
+    def set_volume_meter(self, source, level):
+        """Updates the visual level meter (0.0 to 1.0)"""
+        def _task():
+            canvas = self.mic_meter if source == "mic" else self.desktop_meter
+            bar = self.mic_bar if source == "mic" else self.desktop_bar
+            width = int(level * 60)
+            canvas.coords(bar, 0, 0, width, 15)
+        self.root.after(0, _task)
 
     def update_preview(self, pil_image):
         def _task():
@@ -98,30 +115,18 @@ class AppGUI:
 
     def add_response(self, text):
         def _task():
-            scroll_pos = self.feed_text.yview()
-            is_at_top = scroll_pos[0] == 0.0
-            top_index = self.feed_text.index("@0,0")
             self.feed_text.configure(state=tk.NORMAL)
             timestamp = self.controller.get_timestamp()
             self.feed_text.insert('1.0', f"{text}\n\n", "response")
             self.feed_text.insert('1.0', f"--- {timestamp} ---\n", "timestamp")
-            if not is_at_top:
-                self.feed_text.see(top_index)
             self.feed_text.configure(state=tk.DISABLED)
             self.feed_text.tag_config("timestamp", foreground="#BB86FC", font=("Helvetica", 10, "italic"))
-            self.feed_text.tag_config("response", lmargin1=10, lmargin2=10)
         self.root.after(0, _task)
 
     def add_reset_separator(self):
         def _task():
-            scroll_pos = self.feed_text.yview()
-            is_at_top = scroll_pos[0] == 0.0
-            top_index = self.feed_text.index("@0,0")
             self.feed_text.configure(state=tk.NORMAL)
-            separator_text = "─" * 80
-            self.feed_text.insert('1.0', f"\n{separator_text}\n\n", "separator")
-            if not is_at_top:
-                self.feed_text.see(top_index)
+            self.feed_text.insert('1.0', f"\n{'─' * 80}\n\n", "separator")
             self.feed_text.configure(state=tk.DISABLED)
             self.feed_text.tag_config("separator", foreground="#03A9F4", justify='center')
         self.root.after(0, _task)
@@ -145,17 +150,13 @@ class AppGUI:
         self.root.after(0, _task)
         
     def set_device_lists(self, mic_list, desktop_list, current_mic_idx, current_desktop_idx):
-        """Populate comboboxes with device lists"""
         def _task():
             self.combo_mic['values'] = mic_list
             self.combo_desktop['values'] = desktop_list
-            
-            # Set current selections
             for item in mic_list:
                 if item.startswith(f"{current_mic_idx}:"):
                     self.combo_mic.set(item)
                     break
-            
             for item in desktop_list:
                 if item.startswith(f"{current_desktop_idx}:"):
                     self.combo_desktop.set(item)
