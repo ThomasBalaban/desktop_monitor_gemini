@@ -1,7 +1,5 @@
 import threading
 import time
-import base64
-import cv2
 import traceback
 from datetime import datetime
 

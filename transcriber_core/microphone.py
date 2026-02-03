@@ -1,15 +1,15 @@
 import os
 import sys
-import numpy as np
-import sounddevice as sd
+import numpy as np # type: ignore
+import sounddevice as sd # type: ignore
 import time
-import soundfile as sf
+import soundfile as sf # type: ignore
 import re
 import traceback
 from queue import Queue
 from threading import Thread, Event, Lock
-import parakeet_mlx
-import mlx.core as mx
+import parakeet_mlx # type: ignore
+import mlx.core as mx # type: ignore
 from .config import MICROPHONE_DEVICE_ID, FS, SAVE_DIR, MAX_THREADS
 
 # VAD Parameters
@@ -137,7 +137,6 @@ class MicrophoneTranscriber:
                 for variation, name in self.name_variations.items():
                     corrected_text = re.sub(variation, name, corrected_text, flags=re.IGNORECASE)
                 
-                print(f"🎤 [Mic Raw]: {corrected_text}")
                 self.result_queue.put((corrected_text, filename, "microphone", 0.85))
             else:
                 if not self.keep_files and filename and os.path.exists(filename):

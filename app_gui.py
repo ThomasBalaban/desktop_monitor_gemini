@@ -1,6 +1,6 @@
 import tkinter as tk
 from tkinter import scrolledtext, font, ttk 
-from PIL import ImageTk, Image
+from PIL import ImageTk, Image # type: ignore
 
 class AppGUI:
     def __init__(self, controller):

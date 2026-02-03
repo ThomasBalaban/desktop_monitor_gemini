@@ -2,8 +2,7 @@ import tkinter as tk
 from datetime import datetime
 import threading
 import time
-import os
-import sounddevice as sd
+import sounddevice as sd # type: ignore
 from queue import Empty
 
 from config_loader import ConfigLoader
