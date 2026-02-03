@@ -17,13 +17,6 @@ class AppGUI:
         # --- Top Frame ---
         top_frame = tk.Frame(self.root, bg="#2E2E2E", padx=10, pady=10)
         top_frame.pack(fill=tk.X)
-        
-        self.btn_analyze = tk.Button(top_frame, text="Analyze Last 5s", 
-                                     command=self.controller.request_analysis, 
-                                     bg="#4CAF50", fg="white", 
-                                     font=("Helvetica", 10, "bold"),
-                                     relief=tk.FLAT, padx=10)
-        self.btn_analyze.pack(side=tk.RIGHT)
 
         # --- Audio Settings Frame ---
         settings_frame = tk.Frame(self.root, bg="#3E3E3E", padx=10, pady=5)
@@ -52,10 +45,23 @@ class AppGUI:
         self.desktop_bar = self.desktop_meter.create_rectangle(0, 0, 0, 15, fill="#2196F3")
 
         # Refresh Button
-        self.btn_refresh = tk.Button(settings_frame, text="🔄 Refresh", 
-                                   command=self.controller.refresh_audio_devices,
-                                   bg="#555555", fg="white", relief=tk.FLAT, font=("Helvetica", 9))
-        self.btn_refresh.pack(side=tk.LEFT)
+        self.btn_refresh = tk.Label(
+            settings_frame, 
+            text="🔄",               # kept simple with just the icon
+            bg="#555555",            # Matches your dark theme
+            fg="white", 
+            font=("Helvetica", 14),
+            padx=8, 
+            pady=2
+        )
+        self.btn_refresh.pack(side=tk.LEFT, padx=(10, 0))
+        
+        # Add interactivity (Click and Hover effects)
+        self.btn_refresh.bind("<Button-1>", lambda e: self.controller.refresh_audio_devices())
+        
+        # Hover animation to make it feel like a real button
+        self.btn_refresh.bind("<Enter>", lambda e: self.btn_refresh.config(bg="#777777"))
+        self.btn_refresh.bind("<Leave>", lambda e: self.btn_refresh.config(bg="#555555"))
         
         # --- Preview Area ---
         self.preview_frame = tk.Frame(self.root, bg="#000000", height=300)

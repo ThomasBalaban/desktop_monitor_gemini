@@ -333,13 +333,6 @@ class AppController:
         if hasattr(self, 'gui') and self.gui:
             self.gui.add_error(f"Streaming Error: {error_message}")
 
-    def request_analysis(self):
-        print("Manual analysis triggered.")
-        self.gui.update_status("Requesting Analysis...", "cyan")
-        self.streaming_manager.trigger_manual_analysis(
-            "Describe exactly what is happening on screen right now, including any audio/dialogue."
-        )
-
     def _start_stream_on_init(self):
         if not self.screen_capture.is_ready():
             self.gui.update_status("Cannot start. No source configured.", "red")

@@ -77,22 +77,6 @@ class StreamingManager:
             if self.debug_mode:
                 print(f"StreamingManager buffered: {entry}")
 
-    def trigger_manual_analysis(self, prompt_override=None):
-        """
-        Manually captures a frame and sends it, regardless of the loop timer.
-        Useful for 'Ask AI' buttons.
-        """
-        print("StreamingManager: Manual analysis triggered.")
-        threading.Thread(target=self._process_single_frame, args=(prompt_override,), daemon=True).start()
-
-    def _process_single_frame(self, prompt_override=None):
-        """Helper to capture and send one frame."""
-        frame = self.screen_capture.capture_frame()
-        if frame:
-            if self.preview_callback:
-                self.preview_callback(frame)
-            self._send_frame_to_gemini(frame, prompt_suffix=prompt_override)
-
     def _stream_loop(self):
         delay = 1.0 / self.target_fps
         
