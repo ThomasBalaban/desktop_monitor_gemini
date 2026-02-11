@@ -32,7 +32,7 @@ class SmartAudioTranscriber:
         self.chunk_duration_ms = 100  # Send small chunks frequently
         
         # Only filter out extremely quiet audio (let VAD do the real filtering)
-        self.db_threshold = -30  # Very low threshold, just to filter dead silence
+        self.db_threshold = -50  # Lowered from -30 to catch quiet singing
 
     def set_volume_callback(self, callback):
         """Register callback for GUI volume updates"""

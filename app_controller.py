@@ -12,7 +12,9 @@ from streaming_manager import StreamingManager
 from app_gui import AppGUI
 from websocket_server import WebSocketServer, WEBSOCKET_PORT
 from transcriber_core.microphone import MicrophoneTranscriber
-from transcriber_core.config import MICROPHONE_DEVICE_ID, DESKTOP_DEVICE_ID 
+
+# FIX: Removed the conflicting import from transcriber_core.config
+# We only need the IDs from the main config file below.
 from config import MICROPHONE_DEVICE_ID, DESKTOP_AUDIO_DEVICE_ID
 
 from openai_realtime_client import OpenAIRealtimeClient
@@ -274,17 +276,22 @@ class AppController:
     def _handle_whisper_transcript(self, transcript):
         print(f"🔊 [Desktop/Raw]: {transcript}")
         self.streaming_manager.add_transcript(f"[AUDIO]: {transcript}")
+        
+        # 1. IMMEDIATE BROADCAST
+        # Don't wait for enrichment; send raw text now so the UI feels responsive
+        self.websocket_server.broadcast({
+            "type": "transcript",
+            "source": "desktop",
+            "speaker": "Unknown",
+            "text": transcript,
+            "enriched": False,
+            "timestamp": time.time(),
+            "status": "raw" 
+        })
+
+        # 2. ENRICH IN BACKGROUND
         if self.transcript_enricher:
             self.transcript_enricher.enrich(transcript)
-        else:
-            self.websocket_server.broadcast({
-                "type": "transcript",
-                "source": "desktop",
-                "speaker": "Unknown",
-                "text": transcript,
-                "enriched": False,
-                "timestamp": time.time()
-            })
 
     def _on_enriched_transcript(self, enriched_text):
         speaker = "Unknown"
@@ -355,7 +362,6 @@ class AppController:
         print("API connection successful. Starting streaming...")
         self.streaming_manager.set_status_callback(self.gui.update_status)
         self.streaming_manager.start_streaming()
-        # FIX: Transition status to 'Streaming' once checks pass
         self.gui.update_status("Streaming", "#4CAF50")
 
     def update_websocket_gui_status(self):

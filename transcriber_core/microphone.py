@@ -125,7 +125,9 @@ class MicrophoneTranscriber:
         """Transcribes a chunk of audio."""
         filename = None
         try:
-            filename = self.save_audio(chunk)
+            # Only save to disk if explicitly requested
+            if self.keep_files:
+                filename = self.save_audio(chunk)
             
             with self.model.transcribe_stream() as transcriber:
                 transcriber.add_audio(mx.array(chunk))
@@ -139,11 +141,12 @@ class MicrophoneTranscriber:
                 
                 self.result_queue.put((corrected_text, filename, "microphone", 0.85))
             else:
-                if not self.keep_files and filename and os.path.exists(filename):
+                # Cleanup if file was created and text was empty
+                if self.keep_files and not self.keep_files and filename and os.path.exists(filename):
                     os.remove(filename)
         except Exception as e:
             print(f"[MIC-ERROR] Transcription thread failed: {str(e)}", file=sys.stderr)
-            if not self.keep_files and filename and os.path.exists(filename):
+            if self.keep_files and filename and os.path.exists(filename):
                 try: os.remove(filename)
                 except: pass
         finally:

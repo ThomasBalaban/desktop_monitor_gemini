@@ -1,6 +1,6 @@
 import asyncio
 import json
-import websockets
+import websockets # type: ignore
 import base64
 import logging
 
@@ -15,12 +15,14 @@ class OpenAIRealtimeClient:
         
         # Realtime API Config
         self.url = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01"
+        
+        # Latency Management
+        self.audio_accumulated_sec = 0.0
+        # Reduced to 3.0s for faster updates during continuous singing
+        self.FORCE_COMMIT_INTERVAL = 3.0  
 
     async def connect(self):
-        """
-        Async connection loop.
-        Must be called with await or loop.run_until_complete().
-        """
+        """Async connection loop."""
         self.loop = asyncio.get_running_loop()
         self._closing = False
         
@@ -54,17 +56,13 @@ class OpenAIRealtimeClient:
             print("OpenAI Connection Closed")
 
     async def disconnect(self):
-        """Gracefully close the WebSocket connection."""
         self._closing = True
         if self.ws:
-            try:
-                await self.ws.close()
-            except:
-                pass
+            try: await self.ws.close()
+            except: pass
             self.ws = None
 
     async def _send_session_update(self):
-        """Configure session with SERVER VAD ENABLED for automatic speech detection."""
         if not self.ws: return
         
         session_update = {
@@ -76,31 +74,26 @@ class OpenAIRealtimeClient:
                     "model": "whisper-1",
                     "language": "en"
                 },
-                # SERVER VAD - OpenAI automatically detects speech and commits
+                # TUNED FOR SINGING/FAST SPEECH
                 "turn_detection": {
                     "type": "server_vad",
-                    "threshold": 0.45,  # Lower = more sensitive to speech
-                    "prefix_padding_ms": 500,  # Audio to include before speech
-                    "silence_duration_ms": 1500  # How long silence before committing
+                    "threshold": 0.35,      # More sensitive (was 0.45)
+                    "prefix_padding_ms": 300, 
+                    "silence_duration_ms": 600 # Much faster commit (was 1000)
                 }
             }
         }
         await self.ws.send(json.dumps(session_update))
-        print("📤 Sent session config (Server VAD ENABLED, English only)")
+        print("📤 Sent session config (Fast VAD 600ms, English)")
 
     async def _handle_message(self, message):
         try:
             data = json.loads(message)
             event_type = data.get("type")
 
-            # --- DEBUG LOGGING ---
-            if "transcription" in event_type:
-                if "failed" in event_type:
-                    print(f"❌ [DEBUG] Transcription FAILED: {data}")
-            # ---------------------
-
             if event_type == "conversation.item.input_audio_transcription.completed":
                 text = data.get("transcript", "")
+                self.audio_accumulated_sec = 0.0
 
                 if text and text.strip():
                     cleaned = self._filter_transcript(text.strip())
@@ -108,73 +101,59 @@ class OpenAIRealtimeClient:
                         self.on_transcript(cleaned)
             
             elif event_type == "conversation.item.input_audio_transcription.delta":
-                pass  # Ignore partial transcripts
-                
-            elif event_type == "response.audio_transcript.done":
-                text = data.get("transcript", "")
-                if text and text.strip():
-                    print(f"🤖 [AI Response]: {text}")
-            
-            elif event_type == "session.created":
-                print("✅ OpenAI Realtime session created")
-                
-            elif event_type == "session.updated":
-                print("✅ OpenAI Realtime session configured - Server VAD enabled!")
-                
-            elif event_type == "input_audio_buffer.speech_started":
-                print("🎤 [VAD] Speech detected...")
+                pass
                 
             elif event_type == "input_audio_buffer.speech_stopped":
-                print("🎤 [VAD] Speech ended, transcribing...")
+                # print("🎤 [VAD] Speech ended...")
+                self.audio_accumulated_sec = 0.0
                 
             elif event_type == "input_audio_buffer.committed":
-                print("📝 [VAD] Audio buffer committed for transcription")
+                # print("📝 [VAD] Buffer committed")
+                self.audio_accumulated_sec = 0.0
                 
             elif event_type == "error":
                 err = data.get("error", {})
                 err_msg = err.get("message", "Unknown error")
-                err_code = err.get("code", "unknown")
-                print(f"❌ OpenAI API Error [{err_code}]: {err_msg}")
+                
+                # Suppress race-condition errors
+                if "buffer too small" in err_msg or "buffer only has" in err_msg:
+                    return
+
+                print(f"❌ OpenAI API Error: {err_msg}")
                 self.on_error(f"API Error: {err_msg}")
 
         except Exception as e:
             print(f"Message Parse Error: {e}")
-            import traceback
-            traceback.print_exc()
 
     def _filter_transcript(self, text):
-        """
-        Filter out non-English or garbage transcripts.
-        Returns None if the text should be discarded.
-        """
-        if not text:
-            return None
-        
-        # Check if text contains mostly non-ASCII characters (non-English)
+        if not text: return None
         ascii_chars = sum(1 for c in text if ord(c) < 128)
-        total_chars = len(text)
-        
-        if total_chars > 0:
-            ascii_ratio = ascii_chars / total_chars
-            if ascii_ratio < 0.7:
-                print(f"🚫 Filtered non-English (Ratio {ascii_ratio:.2f}): {text}")
-                return None
-            
+        if len(text) > 0 and (ascii_chars / len(text)) < 0.7:
+            print(f"🚫 Filtered non-English: {text}")
+            return None
         return text
     
     async def send_audio_chunk(self, audio_bytes):
-        """
-        Send audio chunk to OpenAI. With server VAD enabled, 
-        we just append audio - the server decides when to transcribe.
-        """
         if self.ws and not self._closing:
             try:
+                # 1. Send Audio
                 encoded = base64.b64encode(audio_bytes).decode("utf-8")
                 append_event = {
                     "type": "input_audio_buffer.append",
                     "audio": encoded
                 }
                 await self.ws.send(json.dumps(append_event))
+                
+                # 2. Track Duration
+                duration = len(audio_bytes) / 48000.0
+                self.audio_accumulated_sec += duration
+                
+                # 3. Force Commit if Threshold Exceeded
+                if self.audio_accumulated_sec >= self.FORCE_COMMIT_INTERVAL:
+                    # print(f"⏱️ [Timer] Forcing commit...")
+                    commit_event = {"type": "input_audio_buffer.commit"}
+                    await self.ws.send(json.dumps(commit_event))
+                    self.audio_accumulated_sec = 0.0
                 
             except Exception as e:
                 if not self._closing:
