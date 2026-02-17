@@ -3,6 +3,7 @@ import json
 import websockets # type: ignore
 import base64
 import logging
+from difflib import SequenceMatcher
 
 class OpenAIRealtimeClient:
     def __init__(self, api_key, on_transcript, on_error):
@@ -16,10 +17,11 @@ class OpenAIRealtimeClient:
         # Realtime API Config
         self.url = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01"
         
-        # Latency Management
+        # Latency & Deduplication
         self.audio_accumulated_sec = 0.0
-        # Reduced to 3.0s for faster updates during continuous singing
-        self.FORCE_COMMIT_INTERVAL = 3.0  
+        self.FORCE_COMMIT_INTERVAL = 3.0
+        self.last_transcript = ""
+        self.last_transcript_time = 0
 
     async def connect(self):
         """Async connection loop."""
@@ -74,17 +76,38 @@ class OpenAIRealtimeClient:
                     "model": "whisper-1",
                     "language": "en"
                 },
-                # TUNED FOR SINGING/FAST SPEECH
                 "turn_detection": {
                     "type": "server_vad",
-                    "threshold": 0.35,      # More sensitive (was 0.45)
+                    "threshold": 0.35, 
                     "prefix_padding_ms": 300, 
-                    "silence_duration_ms": 600 # Much faster commit (was 1000)
+                    "silence_duration_ms": 600
                 }
             }
         }
         await self.ws.send(json.dumps(session_update))
         print("📤 Sent session config (Fast VAD 600ms, English)")
+
+    def _is_duplicate(self, new_text):
+        """Checks if the new text is a repeat of the last one."""
+        if not new_text or len(new_text) < 2: return False
+        
+        # Exact match
+        if new_text == self.last_transcript:
+            return True
+            
+        # Suffix match (e.g. "Hello world" -> "world")
+        if self.last_transcript.endswith(new_text):
+            return True
+            
+        # Fuzzy match for stuttering/overlap
+        matcher = SequenceMatcher(None, self.last_transcript, new_text)
+        match = matcher.find_longest_match(0, len(self.last_transcript), 0, len(new_text))
+        
+        # If the overlap covers most of the new text, it's a duplicate
+        if match.size > len(new_text) * 0.8:
+            return True
+            
+        return False
 
     async def _handle_message(self, message):
         try:
@@ -97,28 +120,26 @@ class OpenAIRealtimeClient:
 
                 if text and text.strip():
                     cleaned = self._filter_transcript(text.strip())
-                    if cleaned:
+                    if cleaned and not self._is_duplicate(cleaned):
+                        self.last_transcript = cleaned
                         self.on_transcript(cleaned)
+                    elif cleaned:
+                        print(f"♻️ Deduplicated: {cleaned}")
             
             elif event_type == "conversation.item.input_audio_transcription.delta":
                 pass
                 
             elif event_type == "input_audio_buffer.speech_stopped":
-                # print("🎤 [VAD] Speech ended...")
                 self.audio_accumulated_sec = 0.0
                 
             elif event_type == "input_audio_buffer.committed":
-                # print("📝 [VAD] Buffer committed")
                 self.audio_accumulated_sec = 0.0
                 
             elif event_type == "error":
                 err = data.get("error", {})
                 err_msg = err.get("message", "Unknown error")
-                
-                # Suppress race-condition errors
                 if "buffer too small" in err_msg or "buffer only has" in err_msg:
                     return
-
                 print(f"❌ OpenAI API Error: {err_msg}")
                 self.on_error(f"API Error: {err_msg}")
 
@@ -129,7 +150,6 @@ class OpenAIRealtimeClient:
         if not text: return None
         ascii_chars = sum(1 for c in text if ord(c) < 128)
         if len(text) > 0 and (ascii_chars / len(text)) < 0.7:
-            print(f"🚫 Filtered non-English: {text}")
             return None
         return text
     
@@ -150,7 +170,6 @@ class OpenAIRealtimeClient:
                 
                 # 3. Force Commit if Threshold Exceeded
                 if self.audio_accumulated_sec >= self.FORCE_COMMIT_INTERVAL:
-                    # print(f"⏱️ [Timer] Forcing commit...")
                     commit_event = {"type": "input_audio_buffer.commit"}
                     await self.ws.send(json.dumps(commit_event))
                     self.audio_accumulated_sec = 0.0

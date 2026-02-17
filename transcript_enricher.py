@@ -56,7 +56,7 @@ class TranscriptEnricher:
         """Update what's currently visible on screen (from Gemini)."""
         self.visual_context = context
         
-    def enrich(self, raw_transcript):
+    def enrich(self, raw_transcript, transcript_id=None):
         """Queue a raw transcript for enrichment."""
         if not raw_transcript or len(raw_transcript.strip()) < 2:
             return
@@ -67,7 +67,8 @@ class TranscriptEnricher:
             self.queue.append({
                 "text": raw_transcript,
                 "timestamp": timestamp,
-                "visual_context": self.visual_context
+                "visual_context": self.visual_context,
+                "id": transcript_id
             })
     
     def _process_loop(self):
@@ -82,13 +83,13 @@ class TranscriptEnricher:
                 try:
                     enriched = self._enrich_transcript(item)
                     if enriched and self.on_enriched_transcript:
-                        self.on_enriched_transcript(enriched)
+                        self.on_enriched_transcript(enriched, item.get("id"))
                 except Exception as e:
                     print(f"⚠️ Enrichment error: {e}")
                     # Fall back to raw transcript
                     if self.on_enriched_transcript:
                         ts = self._format_timestamp(item["timestamp"])
-                        self.on_enriched_transcript(f"[{ts}] {item['text']}")
+                        self.on_enriched_transcript(f"[{ts}] {item['text']}", item.get("id"))
             else:
                 time.sleep(0.1)
     
@@ -124,51 +125,25 @@ class TranscriptEnricher:
         
         speaker_history = self._get_speaker_history()
         
-        prompt = f"""You are a professional transcript formatter for animated shows, music videos, and video content.
+        prompt = f"""You are a professional transcript formatter.
 
-CURRENT VISUAL CONTEXT (what's on screen right now):
+CURRENT VISUAL CONTEXT:
 {visual}
 
 {speaker_history}
 
 {history}
 
-RAW AUDIO TRANSCRIPTION (just captured):
+RAW AUDIO:
 "{raw_text}"
 
 TIMESTAMP: [{timestamp}]
 
-YOUR TASK: Transform the raw transcription into a richly formatted transcript line.
-
-SPEAKER IDENTIFICATION RULES:
-1. If you can identify a CHARACTER NAME from the visual context, use it (e.g., "Charlie:", "Alastor:", "Cherri Bomb:")
-2. If you DON'T know the character name, use DESCRIPTIVE LABELS with consistent numbering:
-   - "Female Singer 1:", "Female Singer 2:" (for different female voices)
-   - "Male Voice 1:", "Male Voice 2:" (for different male voices)
-   - "Girl (blonde):", "Woman (red dress):" (use visual descriptions if visible)
-   - "Narrator:", "Announcer:", "Chorus:" (for special roles)
-3. KEEP SPEAKERS CONSISTENT - if "Female Singer 1" was used before for the same voice, use it again
-4. Add distinguishing details in the label when possible: "Female Voice (raspy):", "Male Singer (deep baritone):"
-
-FORMAT RULES:
-1. Add vocal/emotional tone in parentheses after the speaker: (singing softly), (shouting), (whispering), (crying), etc.
-2. If it's sung lyrics, describe the singing style
-3. For sound effects, use [SFX: description] - explosions, doors, footsteps, etc.
-4. For notable music changes, use [Music: description] - tempo changes, instrument shifts, mood changes
-5. Put actual dialogue/lyrics in quotes
-
-OUTPUT FORMAT EXAMPLES:
-[{timestamp}] Charlie: (singing hopefully) "Inside of every demon is a rainbow!"
-[{timestamp}] Female Singer 1: (belting powerfully) "I can hear you calling!"
-[{timestamp}] Male Voice (gravelly): (speaking menacingly) "You shouldn't have come here."
-[{timestamp}] [SFX: Glass shattering] [Music: Drums kick in aggressively]
-[{timestamp}] [SFX: Explosion] Girl (pink hair): (screaming) "Watch out!"
-
-CRITICAL:
-- Output ONLY the single formatted line, nothing else
-- Keep the original words/lyrics, just add formatting
-- Be consistent with speaker labels across the session
-- If multiple things happen, combine them on one line
+TASK: Format the raw transcription.
+- Identify SPEAKER (Character Name if known from visuals, else "Male Voice 1", etc.)
+- Add TONE in parentheses: (sarcastic), (whispering)
+- Add SFX/Music if implied.
+- Output ONLY the formatted line.
 
 OUTPUT:"""
 
@@ -176,7 +151,7 @@ OUTPUT:"""
             response = self.client.chat.completions.create(
                 model="gpt-4o",
                 messages=[
-                    {"role": "system", "content": "You are a transcript formatter. Output only the formatted line, nothing else. Be consistent with speaker identification."},
+                    {"role": "system", "content": "You are a transcript formatter. Output only the formatted line."},
                     {"role": "user", "content": prompt}
                 ],
                 max_tokens=250,
@@ -184,11 +159,8 @@ OUTPUT:"""
             )
             
             enriched = response.choices[0].message.content.strip()
-            
-            # Try to extract and track speaker for consistency
             self._track_speaker(enriched)
             
-            # Add to history for continuity
             self.recent_transcripts.append(enriched)
             if len(self.recent_transcripts) > self.max_history:
                 self.recent_transcripts.pop(0)
@@ -200,15 +172,11 @@ OUTPUT:"""
             return f"[{timestamp}] {raw_text}"
     
     def _track_speaker(self, enriched_line):
-        """Extract and track speaker labels for consistency."""
-        # Try to find speaker pattern: [timestamp] Speaker: 
         import re
         match = re.search(r'\[\d+:\d+\]\s*(?:\[.*?\]\s*)?([^:(]+?)(?:\s*\([^)]+\))?:', enriched_line)
         if match:
             speaker = match.group(1).strip()
-            # Only track generic speakers (not character names which are already consistent)
             if any(x in speaker.lower() for x in ['female', 'male', 'voice', 'singer', 'girl', 'boy', 'woman', 'man']):
-                # Create a simplified key
                 key = speaker.lower()
                 if key not in self.known_speakers:
                     self.known_speakers[key] = speaker
