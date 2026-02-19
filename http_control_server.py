@@ -1,7 +1,7 @@
 """
 http_control_server.py — Lightweight HTTP control server for desktop_mon_gemini.
 
-Port: 8005
+Port: 8007
   GET  /health   → {"status": "ok"} — launcher health check
   POST /shutdown → triggers clean app shutdown from the launcher
 
@@ -12,7 +12,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 
-CONTROL_PORT = 8005
+# CHANGED: 8005 -> 8007 to avoid port conflict with Twitch Service
+CONTROL_PORT = 8007
 
 _shutdown_callback = None
 _server: HTTPServer | None = None
